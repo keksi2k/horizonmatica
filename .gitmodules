@@ -1,0 +1,3 @@
+[submodule "libs/horizon-menus"]
+	path = libs/horizon-menus
+	url = https://github.com/keksi2k/horizon-menus

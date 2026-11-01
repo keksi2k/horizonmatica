@@ -1,0 +1,10 @@
+[package]
+name = "horizonmatica-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Horizonmatica: .litematic loading, placement transforms, verifier, material list and printer planning"
+
+# Every dependency must already be in Horizon's Cargo.lock (horizon-mixins checks it).
+[dependencies]
+flate2 = "1"
