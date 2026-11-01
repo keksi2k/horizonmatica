@@ -1,3 +1,5 @@
+<img src="icon.png" alt="Horizonmatica icon" width="128" align="right">
+
 # Horizonmatica
 
 A native mod for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft Java Edition 26.3, rewritten in Rust):
@@ -216,6 +218,7 @@ mixins/horizonmatica/          the bundle Horizon builds in
                                arrays, rotation/mirroring, verifier, material list, printer planning
   menus/, menus_*.rs           copy of horizon-menus with its screen hooks (don't edit: vendor_menus.py)
 libs/horizon-menus/            the menu library (git submodule: github.com/keksi2k/horizon-menus)
+tools/make_icon.py             renders icon.png
 tools/package.py               packs the .hnmod (and checks the horizon-menus copy is current);
                                --sign also signs it with minisign (asks for the key's password)
 minisign.pub                   the public key release files are signed with
