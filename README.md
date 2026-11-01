@@ -69,6 +69,21 @@ screen for its menu), so it is pinned to one Horizon commit: `horizon_revision` 
 checked against. It needs the render hooks `world_drawn`/`render_needs` (API 58+). For another Nightly, set its
 commit (`python tools/package.py --horizon <commit>`) and build again.
 
+### Verifying downloads
+
+Every release `.hnmod` is signed with [minisign](https://jedisct1.github.io/minisign/); the signature is the
+`.minisig` asset next to it. The public key is [`minisign.pub`](minisign.pub):
+
+```
+RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
+```
+
+Check a download with:
+
+```
+minisign -Vm horizonmatica-0.1.0.hnmod -P RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
+```
+
 ## Usage
 
 Schematics go into the `schematics/` folder next to `options.txt` of your Horizon instance
@@ -201,7 +216,9 @@ mixins/horizonmatica/          the bundle Horizon builds in
                                arrays, rotation/mirroring, verifier, material list, printer planning
   menus/, menus_*.rs           copy of horizon-menus with its screen hooks (don't edit: vendor_menus.py)
 libs/horizon-menus/            the menu library (git submodule: github.com/keksi2k/horizon-menus)
-tools/package.py               packs the .hnmod (and checks the horizon-menus copy is current)
+tools/package.py               packs the .hnmod (and checks the horizon-menus copy is current);
+                               --sign also signs it with minisign (asks for the key's password)
+minisign.pub                   the public key release files are signed with
 ```
 
 Clone with `git clone --recursive`, or run `git submodule update --init` afterwards. After updating the library:

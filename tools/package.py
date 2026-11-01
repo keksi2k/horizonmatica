@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Packs the bundle into horizonmatica-<version>.hnmod (a zip: horizon-native.json + mixins/horizonmatica/...).
 
-    python tools/package.py [--horizon <commit>]
+    python tools/package.py [--horizon <commit>] [--sign]
 
 --horizon overrides the pinned commit (default: [compatibility] horizon_revision of horizon-mixin.toml).
+--sign signs the package with minisign (default secret key ~/.minisign/minisign.key, asks for its password)
+and verifies the signature against minisign.pub, writing <package>.minisig next to it.
 """
 import argparse
 import json
@@ -20,6 +22,7 @@ ALLOWED_TEXT = ("README", "LICENSE", "COPYING", "NOTICE", ".gitignore")
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--horizon", help="Horizon commit to pin (40 hex chars)")
+    ap.add_argument("--sign", action="store_true", help="sign the package with minisign")
     args = ap.parse_args()
     # The bundle's copy of horizon-menus must match the library (the libs/horizon-menus submodule).
     import subprocess
@@ -59,6 +62,12 @@ def main() -> None:
                 z.write(path, arc)
             files += 1
     print(f"wrote {out} ({files} files, Horizon {horizon[:10]})")
+    if args.sign:
+        sig = out.with_name(out.name + ".minisig")
+        sig.unlink(missing_ok=True)  # never leave a stale signature next to a new package
+        subprocess.run(["minisign", "-Sm", str(out)], check=True)
+        subprocess.run(["minisign", "-Vm", str(out), "-p", str(ROOT / "minisign.pub")], check=True)
+        print(f"wrote {sig}")
 
 
 if __name__ == "__main__":
