@@ -8,6 +8,7 @@
 and verifies the signature against minisign.pub, writing <package>.minisig next to it.
 """
 import argparse
+import hashlib
 import json
 import pathlib
 import re
@@ -45,23 +46,26 @@ def main() -> None:
                 "horizon": horizon, "mixins": MIXINS_REV}
     out = ROOT / "dist" / f"horizonmatica-{version}.hnmod"
     out.parent.mkdir(exist_ok=True)
-    files = 0
+    # Deterministic, like horizon-mods' native.py: sorted names, fixed time and mode, the bytes as
+    # committed, so anyone can rebuild the file from the tag and get the same SHA-256.
+    entries = {"horizon-native.json": (json.dumps(manifest, indent=2) + "\n").encode()}
+    for path in sorted(BUNDLE.rglob("*")):
+        if not path.is_file() or "target" in path.relative_to(BUNDLE).parts:
+            continue
+        rel = path.relative_to(BUNDLE)
+        if path.suffix not in (".rs", ".toml") and not path.name.startswith(ALLOWED_TEXT) \
+                and "data" not in rel.parts:
+            continue
+        arc = f"mixins/horizonmatica/{rel.as_posix()}"
+        entries[arc] = toml.encode() if rel.as_posix() == "horizon-mixin.toml" else path.read_bytes()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("horizon-native.json", json.dumps(manifest, indent=2) + "\n")
-        for path in sorted(BUNDLE.rglob("*")):
-            if not path.is_file() or "target" in path.relative_to(BUNDLE).parts:
-                continue
-            rel = path.relative_to(BUNDLE)
-            if path.suffix not in (".rs", ".toml") and not path.name.startswith(ALLOWED_TEXT) \
-                    and "data" not in rel.parts:
-                continue
-            arc = f"mixins/horizonmatica/{rel.as_posix()}"
-            if rel.as_posix() == "horizon-mixin.toml":
-                z.writestr(arc, toml)
-            else:
-                z.write(path, arc)
-            files += 1
-    print(f"wrote {out} ({files} files, Horizon {horizon[:10]})")
+        for name, content in sorted(entries.items()):
+            info = zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            z.writestr(info, content)
+    digest = hashlib.sha256(out.read_bytes()).hexdigest()
+    print(f"wrote {out} ({len(entries) - 1} files, Horizon {horizon[:10]})\nsha256 {digest}")
     if args.sign:
         sig = out.with_name(out.name + ".minisig")
         sig.unlink(missing_ok=True)  # never leave a stale signature next to a new package
