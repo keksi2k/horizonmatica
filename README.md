@@ -63,11 +63,11 @@ building them.
 
    or in the launcher: **Mods** → install a native mod from a folder (or a `.hnmod` file) → **Build**.
    The first build downloads Rust and takes 20–30 minutes; later builds are faster.
-3. To get a package: `python tools/package.py` writes `dist/horizonmatica-0.1.0.hnmod`.
+3. To get a package: `python tools/package.py` writes `dist/horizonmatica-0.1.1.hnmod`.
 
 **Version:** the mod uses game internals (block models, placement prediction, the data fixer, the Debug Options
 screen for its menu), so it is pinned to one Horizon commit: `horizon_revision` in
-`mixins/horizonmatica/horizon-mixin.toml`, currently **Nightly 2026-11-01 (`4aa6854`, hook API 80)**, which it is
+`mixins/horizonmatica/horizon-mixin.toml`, currently **Nightly 2026-11-01 (`c9d474d`, hook API 80)**, which it is
 checked against. It needs the render hooks `world_drawn`/`render_needs` (API 58+). For another Nightly, set its
 commit (`python tools/package.py --horizon <commit>`) and build again.
 
@@ -83,7 +83,7 @@ RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
 Check a download with:
 
 ```
-minisign -Vm horizonmatica-0.1.0.hnmod -P RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
+minisign -Vm horizonmatica-0.1.1.hnmod -P RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
 ```
 
 ## Usage
@@ -222,6 +222,7 @@ tools/make_icon.py             renders icon.png
 tools/package.py               packs the .hnmod (and checks the horizon-menus copy is current);
                                --sign also signs it with minisign (asks for the key's password)
 minisign.pub                   the public key release files are signed with
+horizon-registry.toml          the project's page in the Horizon mod registry (read from the newest release's tag)
 ```
 
 Clone with `git clone --recursive`, or run `git submodule update --init` afterwards. After updating the library:

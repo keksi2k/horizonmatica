@@ -3,13 +3,13 @@
 
 [mod]
 id = "horizonmatica"
-version = "0.1.0"
+version = "0.1.1"
 
 # The mod uses game internals beyond the stable hook points (block models, the view, placement
 # prediction, the entity geometry), so it is pinned to the Horizon commit it was checked against:
-# Nightly 2026-11-01 (4aa6854). For another Nightly, set its commit here (see README.md).
+# Nightly 2026-11-01 (c9d474d). For another Nightly, set its commit here (see README.md).
 [compatibility]
-horizon_revision = "4aa6854a886183440256f4f4a4a9d1ed853227a1"
+horizon_revision = "c9d474dd9116e84c243f8992d75c11314df56f06"
 
 # ---------------------------------------------------------------- modules
 

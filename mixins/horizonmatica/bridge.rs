@@ -74,8 +74,13 @@ pub fn options(through: bool, visible: bool) {
     });
 }
 
+/// Drops every section. The revision keeps counting: the GPU side keeps a buffer while its
+/// section's revision matches, so starting again from 0 would keep showing the old quads.
 pub fn clear() {
-    *SCENE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    scene(|s| {
+        s.sections.clear();
+        s.revision += 1;
+    });
 }
 
 #[repr(C)]

@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(crate) const ID: &str = "horizonmatica";
-pub(crate) const VERSION: &str = "0.1.0";
+pub(crate) const VERSION: &str = "0.1.1";
 pub(crate) const DESCRIPTION: &str = "Schematic overlay, verifier, material list and printer (auto-build) for      .litematic, .schem, .schematic and .nbt files. Based on Litematica by masa (maruohon) and Sakura-Ryoko,      and the Litematica Printer by aleksilassila. Not made or endorsed by them.";
 
 /// Who Horizonmatica owes its design to (`/horizonmatica credits`, the settings page).
@@ -668,6 +668,9 @@ fn feet(game: &Game<'_>) -> Option<[i32; 3]> {
 
 fn reset_caches(s: &mut State) {
     s.ids.clear();
+    // Keyed by palette index and checked only against the placement's revision, which a new
+    // placement starts again at 0: without this a new schematic shows the old one's blocks.
+    s.resolved.clear();
     s.items.clear();
     s.unknown.clear();
     s.totals.clear();
