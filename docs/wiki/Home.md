@@ -15,7 +15,7 @@ behind it. All commands start with `/horizonmatica` or the short form `/hm`.
 | 4 | [Tool](Tool.md) | The selection tool: its item, its aim, its mouse controls |
 | 5 | [Printer](Printer.md) | The auto-builder |
 | 6 | [Display](Display.md) | How the overlay and the HUD look, and how far the overlay reaches |
-| 7 | [Materials](Materials.md) | What the selected placement still needs |
+| 7 | [Materials](Materials.md) | What the selected placement still needs; highlight missing and wrong blocks |
 | 8 | Credits | The originals and their authors. **Show the credits in chat** does the same as `/hm credits` |
 
 Every tab also has **Done** at the bottom right, which closes the menu.

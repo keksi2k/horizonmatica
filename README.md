@@ -90,7 +90,7 @@ minisign -Vm horizonmatica-0.2.0.hnmod -P RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+
 
 ## Usage
 
-The [wiki](docs/wiki/Home.md) explains every button of the menu, tab by tab, with the matching command.
+The [wiki](https://github.com/keksi2k/horizonmatica/wiki) explains every button of the menu, tab by tab, with the matching command.
 
 Schematics go into the `schematics/` folder next to `options.txt` of your Horizon instance
 (`/horizonmatica folder` shows the path). `.litematic`, `.schem`, `.schematic` and `.nbt` files are read; the mod
