@@ -5,6 +5,9 @@
 All commands start with `/horizonmatica` or `/hm`. `/hm help` lists them in game. A switch without `on` or `off`
 toggles.
 
+The chat completes the commands: type `/hm ` and it offers the subcommands, narrowing them down as you type. After
+`load` it offers your schematic files, and after `select` and `unload` your placements. **Tab** takes a suggestion.
+
 ## Files
 
 | Command | Effect | In the menu |
@@ -67,6 +70,9 @@ toggles.
 |---|---|---|
 | `/hm render [on\|off]` | Draws the overlay or not | [Display](Display.md): **Rendering** |
 | `/hm through [on\|off]` | Draws it through blocks | Display: **See through blocks** |
+| `/hm highlight missing\|wrong [on\|off]` | Marks missing or wrong blocks through everything | Display or [Materials](Materials.md#highlighting-blocks) |
+| `/hm highlight item <item>\|all` | Marks only that item, or all again | Materials: click a row |
+| `/hm highlight off` | Switches the highlights off | — |
 | `/hm mode [ghost\|boxes]` | Ghost blocks or boxes. Without a word it switches | Display: **Mode** |
 | `/hm radius <blocks>\|view` | How far the overlay reaches | Display: **Render radius**, **Radius = view distance** |
 | `/hm faces <n>\|none` | The most faces it keeps, such as `300k` or `2m` | Display: **Face limit** |
@@ -85,6 +91,7 @@ toggles.
 
 | Command | Effect | In the menu |
 |---|---|---|
-| `/hm materials` | Prints the material list in chat and switches the HUD list | [Display](Display.md): **Print the material list to chat** |
+| `/hm materials [on\|off]` | The material list in the HUD | [Materials](Materials.md): **HUD list** |
+| `/hm materials copy` | Copies the material list to the clipboard as a table | Materials: **Copy** |
 | `/hm credits` | Prints who made the originals | Credits: **Show the credits in chat** |
 | `/hm help` | Lists the commands | — |

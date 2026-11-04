@@ -45,7 +45,7 @@ show schematics as ghost blocks, check your build against them, get a material l
 | Verifier overlay: wrong block (red), wrong state (orange), extra block (pink) | ✅ |
 | Layer modes: all / one layer / above / below / range | ✅ |
 | Info HUD (progress in %, missing, wrong) | ✅ |
-| Material list (HUD with item icons, chat, menu), missing vs. carried | ✅ |
+| Material list (HUD with item icons, menu, copy as a table for spreadsheets), missing vs. carried | ✅ |
 | Own menu screen (M) drawn with the game's widgets | ✅ |
 | **Printer**: places missing blocks within reach automatically, facing the right way | ✅ |
 | Area selection and saving it as a `.litematic` (blocks and their states) | ✅ |
@@ -65,11 +65,11 @@ building them.
 
    or in the launcher: **Mods** → install a native mod from a folder (or a `.hnmod` file) → **Build**.
    The first build downloads Rust and takes 20–30 minutes; later builds are faster.
-3. To get a package: `python tools/package.py` writes `dist/horizonmatica-0.1.1.hnmod`.
+3. To get a package: `python tools/package.py` writes `dist/horizonmatica-0.2.0.hnmod`.
 
 **Version:** the mod uses game internals (block models, placement prediction, the data fixer, the Debug Options
 screen for its menu), so it is pinned to one Horizon commit: `horizon_revision` in
-`mixins/horizonmatica/horizon-mixin.toml`, currently **Nightly 2026-11-01 (`c9d474d`, hook API 80)**, which it is
+`mixins/horizonmatica/horizon-mixin.toml`, currently **Nightly 2026-11-04 (`67dad0d`, hook API 359)**, which it is
 checked against. It needs the render hooks `world_drawn`/`render_needs` (API 58+). For another Nightly, set its
 commit (`python tools/package.py --horizon <commit>`) and build again.
 
@@ -85,7 +85,7 @@ RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
 Check a download with:
 
 ```
-minisign -Vm horizonmatica-0.1.1.hnmod -P RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
+minisign -Vm horizonmatica-0.2.0.hnmod -P RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
 ```
 
 ## Usage
@@ -121,6 +121,7 @@ tells the format by the contents. When two files share a name, loading without a
 | `/horizonmatica unload [<n>\|all]` | Unload the selected placement, another one, or all (and forget them for this world) |
 | `/horizonmatica origin here` · `origin <x> <y> <z>` · `move <dx> <dy> <dz>` | Move it |
 | `/horizonmatica rotate cw\|ccw\|180\|none` · `mirror none\|x\|z` | Rotate / mirror it |
+| `/horizonmatica highlight missing\|wrong [on\|off]` · `item <item>\|all` · `off` | Mark missing or wrong blocks through everything, optionally of one item |
 | `/horizonmatica pos1` · `pos2` (· `here` · `<x> <y> <z>`) | Set a corner of the area selection: the block you look at, where you stand, or a position |
 | `/horizonmatica tool` `on` · `off` · `<item>` · `mode area\|placement` | The selection tool (default: a stick), and whether it works on the area or the placements |
 | `/horizonmatica area` · `area clear` | Show / clear the area selection |
@@ -129,11 +130,12 @@ tells the format by the contents. When two files share a name, loading without a
 | `/horizonmatica render on\|off` · `through on\|off` · `mode ghost\|boxes` | Display (`through`: see through blocks) |
 | `/horizonmatica radius <blocks>\|view` · `faces <n>\|none` · `fluids on\|off` | How far the overlay reaches (`view`: as far as you see), the most faces it keeps (`300k`, `2m`, `none`), water and lava shown or hidden |
 | `/horizonmatica info` | Position, progress, errors |
-| `/horizonmatica materials` | Material list to chat, and the HUD list on or off |
+| `/horizonmatica materials [on\|off]` · `materials copy` | The material list in the HUD on or off; copy it to the clipboard as a table for a spreadsheet |
 | `/horizonmatica printer on\|off` · `air on\|off` · `speed <ticks>` · `reach <blocks>` | Printer |
 | `/horizonmatica credits` | Who made the originals |
 
-`/hm` is the short form.
+`/hm` is the short form. The chat completes the commands: type `/hm ` and it offers the subcommands and their
+options as you type, with your schematic files after `load` and your placements after `select` and `unload`.
 
 **How far you see the schematic:** the overlay is built around you, nearest first: within the render radius
 (32 blocks by default; the menu goes to 1024, `/hm radius <blocks>` any further) or, with `/hm radius view`, as far
@@ -237,7 +239,7 @@ tooltips, item icons) by [horizon-menus](libs/horizon-menus/README.md). The game
 | Tool | The selection tool: on/off, which item (pick one of eight with their icons, type an id, or take the one in your hand), its reach, whether a click marks the block hit or the one in front of it, whether water and lava stop it, its controls in the HUD |
 | Printer | On/off, blocks placed, speed and reach as sliders, air place |
 | Display | Overlay and HUD settings (opacity, render radius or view distance, face limit, water and lava), and what the overlay holds right now |
-| Materials | Material list with item icons: missing, total, carried; the HUD list on/off |
+| Materials | Material list with item icons: missing, total, carried; copy it for a spreadsheet; the HUD list on/off |
 | Credits | The originals and their authors |
 
 When the screen can't open (over another screen, say), M opens the mod's page in **Options › Mods** instead, with the
@@ -274,9 +276,15 @@ the wanted state comes out (stairs the right way round, top/bottom slabs, furnac
   bells) show their real model.
 - The camera never moves (as with litematica-printer). In your own world the click is used within the same tick; on
   servers only the server is told the right look for the click.
-- **Air place** (`/hm printer air on|off`, on by default): when no neighbour can be clicked, it clicks the empty spot
+- **Air place** (`/hm printer air on|off`, off by default): when no neighbour can be clicked, it clicks the empty spot
   itself, which vanilla servers allow. It checks first that the result faces the right way. Anti-cheat plugins
   (Grim, say) notice this.
+- **Without air place,** only blocks next to a real block whose face you can see are tried; the rest are passed over
+  at once and the HUD counts them. With it, blocks with such a neighbour still come first.
+- Blocks that can't be placed as wanted from where you stand aren't tried again until you move or a neighbour changes.
+- Logs, froglights and other pillars take their direction from the clicked face alone: without air place they need a
+  real block on the matching side, with that face in view.
+- Plants are placed by the item that grows them and count as correct at any stage of growth.
 - Fluids are not placed. Blocks that can't be placed right from any reachable side are skipped; the HUD says why.
 - ⚠️ On other people's servers, automatic placing may break the rules or trip anti-cheat.
 

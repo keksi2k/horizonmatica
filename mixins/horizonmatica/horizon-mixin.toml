@@ -3,13 +3,13 @@
 
 [mod]
 id = "horizonmatica"
-version = "0.1.1"
+version = "0.2.0"
 
 # The mod uses game internals beyond the stable hook points (block models, the view, placement
 # prediction, the entity geometry), so it is pinned to the Horizon commit it was checked against:
-# Nightly 2026-11-01 (c9d474d). For another Nightly, set its commit here (see README.md).
+# Nightly 2026-11-04 (67dad0d). For another Nightly, set its commit here (see README.md).
 [compatibility]
-horizon_revision = "c9d474dd9116e84c243f8992d75c11314df56f06"
+horizon_revision = "67dad0d1a5adca139b426c8114e74a33b376ba64"
 
 # ---------------------------------------------------------------- modules
 
@@ -110,6 +110,19 @@ bindings = [
   { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
   { name = "button", ty = "winit::event::MouseButton", value = "button" },
   { name = "pressed", ty = "bool", value = "pressed" },
+]
+
+# The chat's completions: the mod's subcommands in the tree it completes with (the "commands" hook
+# only names the commands; everything after the name would be free text).
+[[injection]]
+id = "chat_tree"
+target = "horizon_client::game::chat::Game<'_>::chat_tree_for"
+kind = "HEAD"
+cancellable = true
+helper = "chat_tree.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "base", ty = "Option<&horizon_client::command::Dispatcher>", value = "base" },
 ]
 
 [[injection]]

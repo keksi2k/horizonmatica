@@ -17,6 +17,8 @@
 | **Boxes around placements** | On | The frames around placements | — |
 | **Show extra blocks** | On | Marks blocks in the world that the schematic doesn't have | — |
 | **Show wrong blocks** | On | Marks blocks that differ from the schematic | — |
+| **Highlight missing blocks** | Off | Marks missing blocks in blue through everything, however far away | `/hm highlight missing [on\|off]` |
+| **Highlight wrong blocks** | Off | Marks wrong blocks in red and wrong states in orange the same way | `/hm highlight wrong [on\|off]` |
 | **Strict states** | Off | Fence, pane, wall and redstone connections and stair shapes also count as wrong | — |
 | **Redstone on/off counts as wrong** | On | Powered, lit and similar states count as wrong | — |
 
@@ -25,8 +27,8 @@
 | Control | Default | What it does | Command |
 |---|---|---|---|
 | **Info HUD** | On | The info lines while playing | — |
-| **Material list HUD** | Off | The material list in the corner while playing | Key **J** |
-| **Print the material list to chat** | | Prints the first 15 kinds in chat. **This also switches the HUD list** | `/hm materials` |
+| **Material list HUD** | Off | The material list in the corner while playing | `/hm materials [on\|off]`, key **J** |
+| **Copy the material list** | | Copies it to the clipboard as a table. See [Materials](Materials.md) | `/hm materials copy` |
 
 ## What the overlay costs
 

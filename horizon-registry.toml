@@ -14,8 +14,10 @@ Horizonmatica is a re-creation of **Litematica** (with its **printer**) for Hori
 - **Layers:** all / one layer / above / below / range.
 - **Placements:** several at once; move, rotate, mirror, show or hide each; a move mode for mouse wheel and arrow keys. The placements are remembered per world and dimension and restored when you join again.
 - **Save your own:** select an area with the selection tool (a stick: left and right click set the corners, the wheel grows and moves the box) and save it as a `.litematic` (blocks and their states), chunk by chunk as in Litematica: chunks not loaded yet show as frames to fly to.
-- **Material list:** missing, total and carried, with item icons, in the HUD, in chat or in the menu.
+- **Material list:** missing, total and carried, with item icons, in the HUD or in the menu, and copied to the clipboard as a table for spreadsheets.
 - **Menu (M):** a screen of its own, drawn with the game's widgets.
+- **Pick block:** middle-click a ghost block to take that block in hand, for building by hand.
+- **Highlights:** mark missing and wrong blocks through everything, however far away, for all items or just one you pick in the material list.
 - **Printer:** places one missing block within reach every few ticks, from the bottom up. It only clicks when Horizon's own placement logic says the click produces exactly the wanted state (stairs, slabs, logs, furnaces…). Redstone-aware order, repeater, comparator and note block setup after placing, double slabs and stacks, chests, falling blocks. The camera never moves.
 
 Usage: put schematics into `schematics/` next to `options.txt` of your instance (`/hm folder` shows the path), then `/hm load <name>` or press **M**. All commands and keys are in the [README](https://github.com/keksi2k/horizonmatica#usage).
@@ -27,9 +29,9 @@ Usage: put schematics into `schematics/` next to `options.txt` of your instance 
 - **"Open folder"** in the menu opens the schematics folder in your file manager through Horizon's own function.
 - No telemetry, no downloads, no code run from schematic files. Schematics are parsed as data only.
 
-⚠️ On other people's servers, automatic placing may break the rules or trip anti-cheat. The printer is off until you turn it on (`K` or `/hm printer on`). Its *air place* option (on by default) is noticed by anti-cheat plugins such as Grim.
+⚠️ On other people's servers, automatic placing may break the rules or trip anti-cheat. The printer is off until you turn it on (`K` or `/hm printer on`). Its *air place* option (off by default) is noticed by anti-cheat plugins such as Grim.
 
-**Version:** native mods use game internals, so Horizonmatica is pinned to one Horizon commit (currently Nightly 2026-11-01, `c9d474d`). A new Nightly needs a new release.
+**Version:** native mods use game internals, so Horizonmatica is pinned to one Horizon commit (currently Nightly 2026-11-04, `67dad0d`). A new Nightly needs a new release.
 
 ## Credits
 The idea, the way it's used, the file format and the behaviour come from **[Litematica](https://github.com/maruohon/litematica)** by masa (maruohon), maintained by **[Sakura-Ryoko](https://github.com/sakura-ryoko/litematica)**, and from **[Litematica Printer](https://github.com/aleksilassila/litematica-printer)** by aleksilassila. Horizonmatica is not an official project of these authors, isn't made or endorsed by them, and contains none of their code. Only the file format and the behaviour are re-created. If you like it, go and support the originals.

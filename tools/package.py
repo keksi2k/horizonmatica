@@ -16,7 +16,7 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BUNDLE = ROOT / "mixins" / "horizonmatica"
-MIXINS_REV = "a2af5c0dd4117d51ecd70066ba7a00b4a2c10dab"  # launcher's native_mods::MIXINS_REV
+MIXINS_REV = "e8cd0aa38cffef49cb2e088ef716baa107148c02"  # launcher's native_mods::MIXINS_REV
 ALLOWED_TEXT = ("README", "LICENSE", "COPYING", "NOTICE", ".gitignore")
 
 

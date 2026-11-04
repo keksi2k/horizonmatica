@@ -7,6 +7,7 @@
 // an outward normal: it is dropped while it faces away from the camera, so a ghost shows only
 // its near faces. A depth buffer of the pass's own keeps the ghosts' inner faces hidden; the
 // world's depth (`RenderNeeds::world_depth`) hides what is behind terrain, unless `through`.
+// The highlights (`marks`) come in a second pass over all of it, never tested against the world.
 
 use crate::mesher::Vertex;
 use std::collections::HashMap;
@@ -21,6 +22,8 @@ pub struct Scene {
     /// Per section: its revision and quads (4 vertices each). Once uploaded the quads are let go
     /// (the GPU keeps them), so they take memory once, not twice.
     pub sections: HashMap<[i32; 3], (u64, Vec<Vertex>)>,
+    /// The highlights, per section in the same way.
+    pub marks: HashMap<[i32; 3], (u64, Vec<Vertex>)>,
     /// Set when the GPU side was made anew (another colour format) after quads were let go: the
     /// game builds every section again (`take_lost`).
     pub lost: bool,
@@ -44,6 +47,7 @@ pub fn set_anchor(anchor: [i32; 3]) {
         if s.anchor != anchor {
             s.anchor = anchor;
             s.sections.clear();
+            s.marks.clear();
             s.revision += 1;
         }
     });
@@ -70,6 +74,27 @@ pub fn remove_section(key: [i32; 3]) {
     });
 }
 
+/// Replaces section `key`'s highlights. Empty removes them.
+pub fn put_marks(key: [i32; 3], quads: Vec<Vertex>) {
+    scene(|s| {
+        s.revision += 1;
+        if quads.is_empty() {
+            s.marks.remove(&key);
+        } else {
+            let rev = s.revision;
+            s.marks.insert(key, (rev, quads));
+        }
+    });
+}
+
+/// Drops every highlight.
+pub fn clear_marks() {
+    scene(|s| {
+        s.marks.clear();
+        s.revision += 1;
+    });
+}
+
 /// Whether the sections have to be handed over again (the GPU side was made anew).
 pub fn take_lost() -> bool {
     scene(|s| std::mem::take(&mut s.lost))
@@ -88,6 +113,7 @@ pub fn options(through: bool, visible: bool) {
 pub fn clear() {
     scene(|s| {
         s.sections.clear();
+        s.marks.clear();
         s.revision += 1;
     });
 }
@@ -150,10 +176,13 @@ struct Gpu {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
+    /// The same for the highlights' pass (always through terrain).
+    marks_uniform: wgpu::Buffer,
     white: wgpu::Texture,
     depth: Option<(wgpu::TextureView, [u32; 2])>,
     /// Per section: the revision uploaded, its vertex buffer and quad count.
     sections: HashMap<[i32; 3], (u64, wgpu::Buffer, u32)>,
+    marks: HashMap<[i32; 3], (u64, wgpu::Buffer, u32)>,
     indices: Option<(wgpu::Buffer, u32)>,
     revision: u64,
 }
@@ -252,12 +281,15 @@ impl Gpu {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Horizonmatica ghost uniform"),
-            size: std::mem::size_of::<Uniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let uniform_buffer = || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Horizonmatica ghost uniform"),
+                size: std::mem::size_of::<Uniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let (uniform, marks_uniform) = (uniform_buffer(), uniform_buffer());
         let white = device.create_texture_with_data(
             queue,
             &wgpu::TextureDescriptor {
@@ -279,9 +311,11 @@ impl Gpu {
             layout,
             sampler,
             uniform,
+            marks_uniform,
             white,
             depth: None,
             sections: HashMap::new(),
+            marks: HashMap::new(),
             indices: None,
             revision: u64::MAX,
         }
@@ -308,21 +342,23 @@ impl Gpu {
     /// uploaded again, the rest kept.
     fn sync(&mut self, device: &wgpu::Device, scene: &mut Scene) {
         self.revision = scene.revision;
-        self.sections.retain(|k, (rev, ..)| scene.sections.get(k).is_some_and(|(r, _)| r == rev));
-        for (key, (rev, quads)) in &mut scene.sections {
-            let n = (quads.len() / 4) as u32;
-            if self.sections.contains_key(key) || n == 0 {
-                continue;
+        for (wanted, have) in [(&mut scene.sections, &mut self.sections), (&mut scene.marks, &mut self.marks)] {
+            have.retain(|k, (rev, ..)| wanted.get(k).is_some_and(|(r, _)| r == rev));
+            for (key, (rev, quads)) in wanted.iter_mut() {
+                let n = (quads.len() / 4) as u32;
+                if have.contains_key(key) || n == 0 {
+                    continue;
+                }
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Horizonmatica ghost vertices"),
+                    contents: bytemuck::cast_slice(&quads[..n as usize * 4]),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                have.insert(*key, (*rev, buffer, n));
+                *quads = Vec::new();
             }
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Horizonmatica ghost vertices"),
-                contents: bytemuck::cast_slice(&quads[..n as usize * 4]),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            self.sections.insert(*key, (*rev, buffer, n));
-            *quads = Vec::new();
         }
-        let most = self.sections.values().map(|(_, _, n)| *n).max().unwrap_or(0);
+        let most = self.sections.values().chain(self.marks.values()).map(|(_, _, n)| *n).max().unwrap_or(0);
         if most > 0 && self.indices.as_ref().is_none_or(|(_, n)| *n < most) {
             let n = most.next_power_of_two();
             let data: Vec<u32> = (0..n).flat_map(|q| [0, 1, 2, 0, 2, 3].map(|i| q * 4 + i)).collect();
@@ -340,7 +376,7 @@ impl Gpu {
 pub fn draw(world: &mut super::WorldDrawn<'_>) {
     let mut scene = SCENE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(scene) = scene.as_mut() else { return };
-    if !scene.visible || scene.sections.is_empty() {
+    if !scene.visible || (scene.sections.is_empty() && scene.marks.is_empty()) {
         return;
     }
     let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
@@ -366,54 +402,57 @@ pub fn draw(world: &mut super::WorldDrawn<'_>) {
         world.depth_size[0] as f32 / world.size[0].max(1) as f32,
         world.depth_size[1] as f32 / world.size[1].max(1) as f32,
     ];
-    world.queue.write_buffer(
-        &gpu.uniform,
-        0,
-        bytemuck::bytes_of(&Uniform {
-            clip: clip.to_cols_array_2d(),
-            params,
-            offset: [offset.x, offset.y, offset.z, 0.0],
-        }),
-    );
+    let uniform = |params| Uniform { clip: clip.to_cols_array_2d(), params, offset: [offset.x, offset.y, offset.z, 0.0] };
+    world.queue.write_buffer(&gpu.uniform, 0, bytemuck::bytes_of(&uniform(params)));
+    world.queue.write_buffer(&gpu.marks_uniform, 0, bytemuck::bytes_of(&uniform([params[0], 1.0, params[2], params[3]])));
     let atlas_view = world
         .atlas
         .map_or_else(|| gpu.white.create_view(&Default::default()), |a| a.create_view(&Default::default()));
-    let group = world.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Horizonmatica ghost resources"),
-        layout: &gpu.layout,
-        entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: gpu.uniform.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
-            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
-            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(world.depth) },
-        ],
-    });
+    let group_with = |buffer: &wgpu::Buffer| {
+        world.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Horizonmatica ghost resources"),
+            layout: &gpu.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(world.depth) },
+            ],
+        })
+    };
+    let (group, marks_group) = (group_with(&gpu.uniform), group_with(&gpu.marks_uniform));
     let indices = indices.clone();
     let depth = gpu.depth_view(world.device, world.size).clone();
-    let mut pass = world.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("Horizonmatica ghosts"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: world.color_view,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-        })],
-        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-            view: &depth,
-            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Discard }),
-            stencil_ops: None,
-        }),
-        ..Default::default()
-    });
-    pass.set_pipeline(&gpu.pipeline);
-    pass.set_bind_group(0, &group, &[]);
-    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-    for (key, (_, buffer, quads)) in &gpu.sections {
-        if !in_view(&clip, *key, scene.anchor) {
+    // The ghosts, then the highlights over them: each pass with a depth buffer of its own.
+    for (group, sections) in [(&group, &gpu.sections), (&marks_group, &gpu.marks)] {
+        if sections.is_empty() {
             continue;
         }
-        pass.set_vertex_buffer(0, buffer.slice(..));
-        pass.draw_indexed(0..quads * 6, 0, 0..1);
+        let mut pass = world.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Horizonmatica ghosts"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: world.color_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &depth,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Discard }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+        pass.set_pipeline(&gpu.pipeline);
+        pass.set_bind_group(0, group, &[]);
+        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        for (key, (_, buffer, quads)) in sections {
+            if !in_view(&clip, *key, scene.anchor) {
+                continue;
+            }
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw_indexed(0..quads * 6, 0, 0..1);
+        }
     }
 }
 

@@ -50,7 +50,7 @@ impl Status {
 }
 
 /// Properties that don't count as a wrong state: they follow neighbours or time, not the build.
-const IGNORED_PROPS: &[&str] = &["waterlogged", "distance", "persistent", "age", "moisture", "stage", "honey_level", "occupied", "open", "has_book", "has_record", "bites", "level", "eye", "in_wall", "locked", "signal_fire", "unstable", "drag", "berries", "short", "attached", "disarmed", "hatch"];
+const IGNORED_PROPS: &[&str] = &["waterlogged", "distance", "persistent", "age", "leaves", "moisture", "stage", "honey_level", "occupied", "open", "has_book", "has_record", "bites", "level", "eye", "in_wall", "locked", "signal_fire", "unstable", "drag", "berries", "short", "attached", "disarmed", "hatch"];
 
 /// Redstone's on/off: wrong only when asked for (`power`), and never in the printer's way.
 const POWER_PROPS: &[&str] = &["power", "powered", "triggered", "lit", "extended", "enabled"];
@@ -116,8 +116,24 @@ pub fn classify_power(
     })
 }
 
+/// Whether two names are one block, or one plant at another stage of growing: a placed bamboo
+/// shoot becomes a stalk, and a kelp or vine's tip becomes body when the next one goes on.
 fn same_block(a: &BlockState, b: &BlockState) -> bool {
-    a.name == b.name
+    a.name == b.name || plant_family(&a.name) == plant_family(&b.name)
+}
+
+fn plant_family(name: &str) -> &str {
+    match name {
+        "minecraft:bamboo_sapling" => "minecraft:bamboo",
+        "minecraft:kelp_plant" => "minecraft:kelp",
+        "minecraft:twisting_vines_plant" => "minecraft:twisting_vines",
+        "minecraft:weeping_vines_plant" => "minecraft:weeping_vines",
+        "minecraft:cave_vines_plant" => "minecraft:cave_vines",
+        "minecraft:big_dripleaf_stem" => "minecraft:big_dripleaf",
+        "minecraft:attached_pumpkin_stem" => "minecraft:pumpkin_stem",
+        "minecraft:attached_melon_stem" => "minecraft:melon_stem",
+        _ => name,
+    }
 }
 
 fn state_status(wanted: &BlockState, actual: &BlockState, strict: bool, power: bool) -> Status {
@@ -142,7 +158,7 @@ fn state_status(wanted: &BlockState, actual: &BlockState, strict: bool, power: b
 /// anything that comes later or doesn't count left out: redstone's on/off, the settings clicked
 /// after placing, connections, stair shapes, and a chest still waiting for its other half.
 pub fn placement_ok(wanted: &BlockState, got: &BlockState) -> bool {
-    if wanted.name != got.name {
+    if !same_block(wanted, got) {
         return false;
     }
     for (k, v) in &wanted.properties {
@@ -298,6 +314,24 @@ mod tests {
         assert!(!placement_ok(&single, &st("minecraft:chest", &[("facing", "east"), ("type", "left")])), "must stay single");
         let slab = st("minecraft:oak_slab", &[("type", "double")]);
         assert!(!placement_ok(&slab, &st("minecraft:oak_slab", &[("type", "bottom")])), "a half isn't a double");
+    }
+
+    #[test]
+    fn plants_at_any_stage() {
+        let bamboo = |age: &str, leaves: &str, stage: &str| st("minecraft:bamboo", &[("age", age), ("leaves", leaves), ("stage", stage)]);
+        let shoot = st("minecraft:bamboo_sapling", &[]);
+        for wanted in [bamboo("1", "large", "0"), bamboo("0", "none", "1"), bamboo("1", "small", "1")] {
+            assert!(placement_ok(&wanted, &shoot), "a click on the ground gives a shoot");
+            assert!(placement_ok(&wanted, &bamboo("0", "none", "0")));
+            assert_eq!(classify(Some(&wanted), &shoot, false, false), Some(Status::Correct));
+            assert_eq!(classify(Some(&wanted), &bamboo("0", "none", "0"), false, false), Some(Status::Correct));
+        }
+        assert_eq!(classify(Some(&shoot), &bamboo("1", "large", "0"), false, false), Some(Status::Correct), "it grew");
+        let body = st("minecraft:kelp_plant", &[]);
+        let tip = st("minecraft:kelp", &[("age", "3")]);
+        assert!(placement_ok(&body, &tip));
+        assert!(!placement_ok(&body, &shoot));
+        assert_eq!(classify(Some(&body), &st("minecraft:stone", &[]), false, false), Some(Status::WrongBlock));
     }
 
     #[test]

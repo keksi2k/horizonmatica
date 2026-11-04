@@ -46,6 +46,27 @@ pub fn items_for_state(state: &BlockState) -> u32 {
     1
 }
 
+/// The item of a block with none of its own, which is what placed it (`getCloneItemStack`).
+pub fn planted_by(block: &str) -> Option<&'static str> {
+    Some(match block {
+        "minecraft:pumpkin_stem" | "minecraft:attached_pumpkin_stem" => "minecraft:pumpkin_seeds",
+        "minecraft:melon_stem" | "minecraft:attached_melon_stem" => "minecraft:melon_seeds",
+        "minecraft:wheat" => "minecraft:wheat_seeds",
+        "minecraft:carrots" => "minecraft:carrot",
+        "minecraft:potatoes" => "minecraft:potato",
+        "minecraft:beetroots" => "minecraft:beetroot_seeds",
+        "minecraft:torchflower_crop" => "minecraft:torchflower_seeds",
+        "minecraft:bamboo_sapling" => "minecraft:bamboo",
+        "minecraft:sweet_berry_bush" => "minecraft:sweet_berries",
+        "minecraft:cave_vines" | "minecraft:cave_vines_plant" => "minecraft:glow_berries",
+        "minecraft:big_dripleaf_stem" => "minecraft:big_dripleaf",
+        "minecraft:kelp_plant" => "minecraft:kelp",
+        "minecraft:twisting_vines_plant" => "minecraft:twisting_vines",
+        "minecraft:weeping_vines_plant" => "minecraft:weeping_vines",
+        _ => return None,
+    })
+}
+
 /// One line of the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Material {
@@ -98,6 +119,16 @@ pub fn stacks(count: u64, stack: u64) -> String {
     if r == 0 { format!("{count} ({s}x{stack})") } else { format!("{count} ({s}x{stack}+{r})") }
 }
 
+/// The list as a table for a spreadsheet: tab-separated with a header row, which Excel and others
+/// split into columns when pasted. `name` gives an item's readable name.
+pub fn table(list: &[Material], name: impl Fn(&str) -> String) -> String {
+    let mut out = String::from("Item\tMissing\tTotal\tCarried\tTo fetch\tItem ID\r\n");
+    for m in list {
+        out += &format!("{}\t{}\t{}\t{}\t{}\t{}\r\n", name(&m.item), m.missing, m.total, m.available, m.to_fetch(), m.item);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +160,12 @@ mod tests {
         assert_eq!(list[1].to_fetch(), 0);
         assert_eq!(stacks(200, 64), "200 (3x64+8)");
         assert_eq!(stacks(12, 64), "12");
+    }
+
+    #[test]
+    fn table_has_a_header_and_a_row_per_item() {
+        let list = [Material { item: "minecraft:stone".into(), total: 10, missing: 7, available: 3 }];
+        let text = table(&list, |_| "Stone".to_string());
+        assert_eq!(text, "Item\tMissing\tTotal\tCarried\tTo fetch\tItem ID\r\nStone\t7\t10\t3\t4\tminecraft:stone\r\n");
     }
 }

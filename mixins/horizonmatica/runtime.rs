@@ -21,7 +21,7 @@ use horizon_world::level::PlaceContext;
 use horizon_world::registry::BlockStateId;
 use horizonmatica_core::formats::Format;
 use horizonmatica_core::materials::{self, Material};
-use horizonmatica_core::printer::{self, PrinterSettings, Recent};
+use horizonmatica_core::printer::{self, PrinterSettings, Recent, Stuck};
 use horizonmatica_core::verify::{self, Status, Tally};
 use horizonmatica_core::{BlockState, LayerMode, Mirror, Placement, Rotation, Schematic};
 use std::cell::RefCell;
@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(crate) const ID: &str = "horizonmatica";
-pub(crate) const VERSION: &str = "0.1.1";
+pub(crate) const VERSION: &str = "0.2.0";
 pub(crate) const DESCRIPTION: &str = "Schematic overlay, verifier, material list and printer (auto-build) for .litematic, .schem, .schematic and .nbt files. Based on Litematica by masa (maruohon) and Sakura-Ryoko, and the Litematica Printer by aleksilassila. Not made or endorsed by them.";
 
 /// Who Horizonmatica owes its design to (`/horizonmatica credits`, the settings page).
@@ -55,6 +55,9 @@ pub(crate) const KEYS: &[(&str, &str, &str)] = &[
     ("move_mode", "Move mode (wheel/arrows move the schematic)", "key.keyboard.n"),
 ];
 
+/// How long the printer may look for a block it can place, per tick. What it can't place is
+/// remembered (`Stuck`), so the next tick goes on from there.
+const PRINT_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
 /// Cells the verifier scans per tick.
 const SCAN_PER_TICK: u64 = 32_768;
 /// Video memory a face of the overlay takes: 4 vertices of 44 bytes (the copy in RAM is let go
@@ -92,6 +95,10 @@ struct Settings {
     hide_fluids: bool,
     show_extra: bool,
     show_wrong: bool,
+    /// Missing blocks are marked through everything, however far.
+    highlight_missing: bool,
+    /// Wrong blocks and wrong states too.
+    highlight_wrong: bool,
     strict: bool,
     hud: bool,
     materials_hud: bool,
@@ -129,6 +136,8 @@ impl Default for Settings {
             hide_fluids: false,
             show_extra: true,
             show_wrong: true,
+            highlight_missing: false,
+            highlight_wrong: false,
             strict: false,
             hud: true,
             materials_hud: false,
@@ -179,7 +188,23 @@ struct Mesh {
     save: Option<(Vec<(i32, i32)>, [i32; 3])>,
     /// The placements' frames as last handed over: box, colour, thickness; and the anchor.
     frames: Option<(Vec<([i32; 3], [i32; 3], u32, u32)>, [i32; 3])>,
+    /// What the highlights show now: missing, wrong, only this item.
+    marks_key: Option<(bool, bool, Option<String>)>,
+    /// Sections with their highlights built: the world section each was built against and how
+    /// many blocks it marks.
+    marks: HashMap<[i32; 3], (Option<Arc<horizon_client::chunk::Section>>, usize)>,
+    /// Blocks marked in all sections.
+    marks_count: usize,
+    /// The sections still to go through, nearest first.
+    marks_queue: std::collections::VecDeque<[i32; 3]>,
+    /// `MAX_MARKS` was reached: only the nearest are marked.
+    marks_full: bool,
 }
+
+/// Most blocks highlighted at once, the nearest ones (about 1 KB of video memory each).
+const MAX_MARKS: usize = 50_000;
+/// Time the highlights may take per tick to go through sections.
+const MARKS_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
 
 /// The render side's section key for the area selection's frame (no real section is that far out).
 const AREA_SECTION: [i32; 3] = [i32::MIN; 3];
@@ -243,6 +268,8 @@ struct State {
     ui_corners: [Option<[i32; 3]>; 2],
     ui_overwrite: Option<String>,
     settings: Settings,
+    /// What the chat offers after `load` (files), and after `select` and `unload` (placements).
+    completions: (&'static [&'static str], &'static [&'static str]),
     /// The loaded placements, drawn in this order (a later one's blocks win where they overlap).
     slots: Vec<Slot>,
     /// Index into `slots` of the selected placement.
@@ -298,6 +325,10 @@ struct State {
     credited: bool,
     printer_note: String,
     placed: u64,
+    /// Blocks no click could place, until something around them changes.
+    stuck: Stuck,
+    /// The highlights show only blocks of this item (a session's choice).
+    highlight_item: Option<String>,
 }
 
 impl State {
@@ -433,13 +464,15 @@ fn menu() -> &'static menus::Menu {
                 p.toggle("placement_boxes", "Boxes around placements", d.placement_boxes);
                 p.toggle("show_extra", "Show extra blocks", d.show_extra);
                 p.toggle("show_wrong", "Show wrong blocks", d.show_wrong);
+                p.toggle("highlight_missing", "Highlight missing blocks (through everything)", d.highlight_missing);
+                p.toggle("highlight_wrong", "Highlight wrong blocks (through everything)", d.highlight_wrong);
                 p.toggle("strict", "Strict states (connections, stair shapes)", d.strict);
                 p.toggle("power", "Redstone on/off counts as wrong", d.power);
             })
             .page("hud", "HUD & material list", |p| {
                 p.toggle("hud", "Info HUD", d.hud);
                 p.toggle("materials_hud", "Material list HUD", d.materials_hud);
-                p.action("materials", "Print the material list to chat");
+                p.action("materials", "Copy the material list");
             })
             .page("credits", "Credits", |p| {
                 p.info("Horizonmatica re-creates Litematica for Horizon.");
@@ -473,6 +506,8 @@ fn load_settings(game: &Game<'_>, s: &mut State) {
         hide_fluids: m.bool(st, "hide_fluids"),
         show_extra: m.bool(st, "show_extra"),
         show_wrong: m.bool(st, "show_wrong"),
+        highlight_missing: m.bool(st, "highlight_missing"),
+        highlight_wrong: m.bool(st, "highlight_wrong"),
         strict: m.bool(st, "strict"),
         hud: m.bool(st, "hud"),
         materials_hud: m.bool(st, "materials_hud"),
@@ -562,6 +597,8 @@ fn save_settings(game: &Game<'_>, s: &Settings) {
     set("hide_fluids", s.hide_fluids.to_string());
     set("show_extra", s.show_extra.to_string());
     set("show_wrong", s.show_wrong.to_string());
+    set("highlight_missing", s.highlight_missing.to_string());
+    set("highlight_wrong", s.highlight_wrong.to_string());
     set("strict", s.strict.to_string());
     set("hud", s.hud.to_string());
     set("materials_hud", s.materials_hud.to_string());
@@ -837,7 +874,7 @@ fn menu_action(game: &mut Game<'_>, action: &str) {
         "select_next" => run(game, &["select", "next"]),
         "show_toggle" => run(game, &["show", "toggle"]),
         "printer_toggle" => run(game, &["printer"]),
-        "materials" => run(game, &["materials"]),
+        "materials" => run(game, &["materials", "copy"]),
         other => match other.strip_prefix("load:") {
             Some(file) => run(game, &["load", file]),
             None => return,
@@ -901,6 +938,7 @@ fn item_for(game: &Game<'_>, s: &mut State, w: &BlockState) -> Option<String> {
     let item = match w.name.as_str() {
         "minecraft:water" | "minecraft:bubble_column" => Some("minecraft:water_bucket".to_string()),
         "minecraft:lava" => Some("minecraft:lava_bucket".to_string()),
+        name if materials::planted_by(name).is_some() => materials::planted_by(name).map(String::from),
         _ => wanted_id(game, s, w).and_then(|id| {
             let item = &game.res.facts().get(id).item;
             (!item.is_empty() && &**item != "minecraft:air").then(|| item.to_string())
@@ -1013,6 +1051,7 @@ fn reset_caches(s: &mut State) {
     s.unloaded = 0;
     s.mesh_key = None;
     s.recent.clear();
+    s.stuck.clear();
 }
 
 /// Counts every item a placement needs (once per load).
@@ -1352,6 +1391,153 @@ pub(super) fn commands(commands: &mut Vec<&'static str>) {
     commands.push("hm");
 }
 
+/// The tree the chat colours and completes with: as the game builds it, with this mod's commands
+/// spelled out, so the chat offers each word as it is typed. Every word still leads to `command`,
+/// which reads the line itself.
+pub(super) fn chat_tree(game: &mut Game<'_>, base: Option<&horizon_client::command::Dispatcher>) -> horizon_client::command::Dispatcher {
+    let mut names = Vec::new();
+    game.native_commands(&mut names);
+    let base = base.unwrap_or_else(|| horizon_client::command::vanilla::game_dispatcher());
+    let mut tree = super::chat::with_native_commands(base, &names);
+    for name in ["horizonmatica", "hm"] {
+        if let Some(root) = tree.find(name) {
+            add_words(&mut tree, root);
+        }
+    }
+    let (files, slots) = with(|s| s.completions);
+    set_completions(&mut tree, files, slots);
+    tree
+}
+
+/// Every subcommand with the words it takes, and the name shown for what it takes besides.
+const WORDS: &[(&str, &[&str], Option<&str>)] = &[
+    ("help", &[], None),
+    ("list", &[], None),
+    ("load", &[], Some("file")),
+    ("reload", &[], None),
+    ("unload", &["all"], Some("placement")),
+    ("placements", &[], None),
+    ("select", &["next", "prev"], Some("placement")),
+    ("show", &["on", "off"], None),
+    ("hide", &[], None),
+    ("lock", &["on", "off"], None),
+    ("unlock", &[], None),
+    ("origin", &["here"], Some("x y z")),
+    ("move", &[], Some("dx dy dz")),
+    ("rotate", &["cw", "ccw", "180", "none"], None),
+    ("mirror", &["none", "x", "z"], None),
+    ("pos1", &["here"], Some("x y z")),
+    ("pos2", &["here"], Some("x y z")),
+    ("area", &["clear"], None),
+    ("save", &["status", "cancel"], Some("name")),
+    ("tool", &["on", "off", "mode"], Some("item")),
+    ("layer", &["all", "up", "down", "here", "above", "below", "range"], Some("y")),
+    ("render", &["on", "off"], None),
+    ("through", &["on", "off"], None),
+    ("highlight", &["missing", "wrong", "item", "off"], None),
+    ("mode", &["ghost", "boxes"], None),
+    ("radius", &["view"], Some("blocks")),
+    ("faces", &["300k", "1m", "2m", "5m", "10m", "none"], Some("number")),
+    ("fluids", &["on", "off"], None),
+    ("info", &[], None),
+    ("materials", &["on", "off", "copy"], None),
+    ("printer", &["on", "off", "speed", "reach", "air"], None),
+    ("folder", &[], None),
+    ("credits", &[], None),
+];
+
+/// What a word takes in turn: (subcommand, word, its words, the name shown for what it takes besides).
+const SUBWORDS: &[(&str, &str, &[&str], Option<&str>)] = &[
+    ("tool", "mode", &["area", "placement"], None),
+    ("layer", "above", &[], Some("y")),
+    ("layer", "below", &[], Some("y")),
+    ("layer", "range", &[], Some("a b")),
+    ("printer", "speed", &[], Some("ticks")),
+    ("printer", "reach", &[], Some("blocks")),
+    ("printer", "air", &["on", "off"], None),
+];
+
+/// A word under `parent` that a command may end with.
+fn add_word(tree: &mut horizon_client::command::Dispatcher, parent: usize, word: &str) -> usize {
+    let node = tree.literal(parent, word);
+    tree.executes(node, horizon_client::command::MOD_COMMAND)
+}
+
+/// Free text under `parent`, to the end of the line (the mod reads it).
+fn add_rest(tree: &mut horizon_client::command::Dispatcher, parent: usize, name: &str) -> usize {
+    let node = tree.argument(parent, name, horizon_client::command::ArgType::Greedy);
+    tree.executes(node, horizon_client::command::MOD_COMMAND)
+}
+
+fn add_words(tree: &mut horizon_client::command::Dispatcher, root: usize) {
+    for &(sub, words, rest) in WORDS {
+        let node = add_word(tree, root, sub);
+        for word in words {
+            add_word(tree, node, word);
+        }
+        if let Some(name) = rest {
+            add_rest(tree, node, name);
+        }
+        for &(of, word, words, rest) in SUBWORDS {
+            if of == sub {
+                let node = add_word(tree, node, word);
+                for word in words {
+                    add_word(tree, node, word);
+                }
+                if let Some(name) = rest {
+                    add_rest(tree, node, name);
+                }
+            }
+        }
+    }
+    if let Some(item) = child(tree, root, "tool").and_then(|tool| child(tree, tool, "item")) {
+        tree.suggests(item, horizon_client::command::Suggests::Fixed(&TOOL_ITEMS));
+    }
+}
+
+/// The child of `node` called `name`.
+fn child(tree: &horizon_client::command::Dispatcher, node: usize, name: &str) -> Option<usize> {
+    tree.nodes[node].children.iter().copied().find(|&c| tree.nodes[c].name() == name)
+}
+
+/// Offers the schematic files after `load`, and the placements after `select` and `unload`.
+fn set_completions(tree: &mut horizon_client::command::Dispatcher, files: &'static [&'static str], slots: &'static [&'static str]) {
+    use horizon_client::command::Suggests;
+    let targets: [(&str, &str, &'static [&'static str]); 3] = [("load", "file", files), ("select", "placement", slots), ("unload", "placement", slots)];
+    for name in ["horizonmatica", "hm"] {
+        let Some(root) = tree.find(name) else { continue };
+        for (sub, arg, list) in targets {
+            if let Some(node) = child(tree, root, sub).and_then(|n| child(tree, n, arg)) {
+                tree.suggests(node, Suggests::Fixed(list));
+            }
+        }
+    }
+}
+
+/// While the chat is open, keeps the names it offers current. The tree only takes `'static` lists,
+/// so a list is leaked when it changes: a few names, and only when files or placements change.
+fn completions_step(game: &mut Game<'_>) {
+    if game.ui.chat_screen.is_none() || game.ticks % 20 != 0 {
+        return;
+    }
+    let files = schematics_dir().map(|dir| horizonmatica_core::list_schematics(&dir)).unwrap_or_default();
+    let slots: Vec<String> = with(|s| s.slots.iter().map(|x| display_name(&x.placement)).collect());
+    let same = |old: &[&str], new: &[String]| old.len() == new.len() && old.iter().zip(new).all(|(a, b)| *a == b);
+    let leak = |new: Vec<String>| -> &'static [&'static str] {
+        Vec::leak(new.into_iter().map(|n| &*String::leak(n)).collect::<Vec<&'static str>>())
+    };
+    let (old_files, old_slots) = with(|s| s.completions);
+    if same(old_files, &files) && same(old_slots, &slots) {
+        return;
+    }
+    let files = if same(old_files, &files) { old_files } else { leak(files) };
+    let slots = if same(old_slots, &slots) { old_slots } else { leak(slots) };
+    with(|s| s.completions = (files, slots));
+    if let Some(remote) = game.remote.as_mut() {
+        set_completions(&mut remote.chat_tree, files, slots);
+    }
+}
+
 fn say(game: &mut Game<'_>, text: &str) {
     game.native_chat(&format!("[Horizonmatica] {text}"));
 }
@@ -1363,8 +1549,9 @@ const HELP: &[&str] = &[
     "/horizonmatica pos1|pos2 [here | <x> <y> <z>] (default: the block you look at) | area [clear] | save <name> [overwrite] | save cancel|status",
     "/horizonmatica tool on|off|<item> | tool mode area|placement: the selection tool (a stick)",
     "/horizonmatica layer all | <y> | above <y> | below <y> | range <a> <b> | up | down | here",
-    "/horizonmatica render on|off | through on|off | mode ghost|boxes | verify | materials",
+    "/horizonmatica render on|off | through on|off | mode ghost|boxes | verify | materials [on|off] | materials copy",
     "/horizonmatica radius <blocks>|view | faces <n>|none | fluids on|off",
+    "/horizonmatica highlight missing|wrong [on|off] | highlight item <item>|all | highlight off",
     "/horizonmatica printer on|off | air on|off | speed <ticks> | reach <blocks>",
     "/horizonmatica credits: who made the original Litematica and its printer",
     "(/hm works as a short form)",
@@ -1838,28 +2025,48 @@ fn run(game: &mut Game<'_>, args: &[&str]) -> Result<Vec<String>, String> {
             with(|s| save_settings(game, &s.settings));
             Ok(vec![msg])
         }
-        "materials" | "mats" => {
+        "highlight" | "hl" => {
             let list = material_list(game);
-            let shown = with(|s| {
-                s.settings.materials_hud = !s.settings.materials_hud;
+            let line = with(|s| -> Result<String, String> {
+                match rest.first().copied() {
+                    None => {}
+                    Some("off") => {
+                        s.settings.highlight_missing = false;
+                        s.settings.highlight_wrong = false;
+                        s.highlight_item = None;
+                    }
+                    Some("missing") => s.settings.highlight_missing = on_off(rest.get(1), s.settings.highlight_missing)?,
+                    Some("wrong") => s.settings.highlight_wrong = on_off(rest.get(1), s.settings.highlight_wrong)?,
+                    Some("item") => match rest[1..].join("_").to_lowercase().as_str() {
+                        "" | "all" | "none" => s.highlight_item = None,
+                        name => {
+                            let item = if name.contains(':') { name.to_string() } else { format!("minecraft:{name}") };
+                            if !list.iter().any(|m| m.item == item) {
+                                return Err(format!("{name} isn't in the selected schematic's material list"));
+                            }
+                            s.highlight_item = Some(item);
+                            if !s.settings.highlight_wrong {
+                                s.settings.highlight_missing = true;
+                            }
+                        }
+                    },
+                    Some(v) => return Err(format!("highlight missing, wrong, item or off, not {v}")),
+                }
                 save_settings(game, &s.settings);
-                s.settings.materials_hud
-            });
-            if list.is_empty() {
-                return Ok(vec!["No schematic loaded, or it needs no items.".into()]);
+                Ok(highlight_text(s))
+            })?;
+            Ok(vec![line])
+        }
+        "materials" | "mats" => {
+            if rest.first() == Some(&"copy") {
+                return copy_materials(game);
             }
-            let mut out = vec![format!(
-                "Materials ({} kinds; HUD list {}): item — missing / total (carried)",
-                list.len(),
-                if shown { "shown" } else { "hidden" }
-            )];
-            for m in list.iter().take(15) {
-                out.push(format!("{} — {} / {} ({})", short(&m.item), m.missing, m.total, m.available));
-            }
-            if list.len() > 15 {
-                out.push(format!("… and {} more", list.len() - 15));
-            }
-            Ok(out)
+            let line = with(|s| -> Result<String, String> {
+                s.settings.materials_hud = on_off(rest.first(), s.settings.materials_hud)?;
+                save_settings(game, &s.settings);
+                Ok(format!("Material list in the HUD: {}", if s.settings.materials_hud { "on" } else { "off" }))
+            })?;
+            Ok(vec![line])
         }
         "printer" | "print" => {
             let msg = with(|s| {
@@ -2106,7 +2313,9 @@ pub(super) fn tick(game: &mut Game<'_>) {
     scan_step(game);
     save_step(game);
     rebuild_mesh(game);
+    marks_step(game);
     printer_step(game);
+    completions_step(game);
 }
 
 /// Leaving a world, or the mod switched off: the overlay is dropped. Otherwise the render side
@@ -2413,6 +2622,186 @@ fn rebuild_mesh(game: &Game<'_>) {
         s.mesh.todo = queue.len();
         s.mesh.queue = queue;
     });
+}
+
+/// What the highlights show, in words.
+fn highlight_text(s: &State) -> String {
+    let what = match (s.settings.highlight_missing, s.settings.highlight_wrong) {
+        (false, false) => return "Highlight off".to_string(),
+        (true, false) => "missing",
+        (false, true) => "wrong",
+        (true, true) => "missing and wrong",
+    };
+    match &s.highlight_item {
+        Some(item) => format!("Highlight: {what} blocks, only {}", short(item)),
+        None => format!("Highlight: {what} blocks"),
+    }
+}
+
+/// Keeps the highlights up to date for the shown placements, however far they reach (the render
+/// radius and the face limit don't count here). Like `rebuild_mesh`, a section is gone through
+/// again only when its world section or what it shows changed, nearest first.
+fn marks_step(game: &Game<'_>) {
+    let Some(me) = feet(game) else { return };
+    let start = std::time::Instant::now();
+    let Some((changed, on, boxes)) = with(|s| {
+        s.mesh_key?;
+        let key = (s.settings.highlight_missing, s.settings.highlight_wrong, s.highlight_item.clone());
+        let changed = s.mesh.marks_key.as_ref() != Some(&key);
+        let on = key.0 || key.1;
+        if changed {
+            s.mesh.marks_key = Some(key);
+            s.mesh.marks.clear();
+            s.mesh.marks_count = 0;
+            s.mesh.marks_queue.clear();
+            s.mesh.marks_full = false;
+            bridge::clear_marks();
+        }
+        let boxes: Vec<_> = s.slots.iter().filter(|x| x.shown).map(|x| x.placement.bounds()).collect();
+        Some((changed, on, boxes))
+    }) else {
+        return;
+    };
+    if !on {
+        return;
+    }
+    let full = changed || with(|s| s.mesh_tick % FAR_EVERY == 1);
+    let reach = if full { i32::MAX / 2 } else { NEAR };
+    let mut wanted: std::collections::HashSet<[i32; 3]> = std::collections::HashSet::new();
+    for (lo, hi) in boxes {
+        let a = [0, 1, 2].map(|i| lo[i].max(me[i].saturating_sub(reach)) >> 4);
+        let b = [0, 1, 2].map(|i| hi[i].min(me[i].saturating_add(reach)) >> 4);
+        for sy in a[1]..=b[1] {
+            for sz in a[2]..=b[2] {
+                for sx in a[0]..=b[0] {
+                    wanted.insert([sx, sy, sz]);
+                }
+            }
+        }
+    }
+    let dist = |k: [i32; 3]| {
+        let d = [0, 1, 2].map(|i| i64::from(k[i]) * 16 + 8 - i64::from(me[i]));
+        d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+    };
+    let mut todo: Vec<[i32; 3]> = with(|s| {
+        if full {
+            // Gone from the placements: dropped.
+            let gone: Vec<_> = s.mesh.marks.keys().filter(|k| !wanted.contains(*k)).copied().collect();
+            for k in gone {
+                if let Some((_, n)) = s.mesh.marks.remove(&k) {
+                    s.mesh.marks_count -= n;
+                }
+                bridge::put_marks(k, Vec::new());
+            }
+            s.mesh.marks_full = false;
+            s.mesh.marks_queue.clear();
+        }
+        wanted
+            .iter()
+            .filter(|&&k| s.mesh.marks.get(&k).is_none_or(|(snap, _)| !same_section(snap, &world_section(game, k))))
+            .copied()
+            .collect()
+    });
+    todo.sort_by_key(|&k| (dist(k), k));
+    let mut queue: std::collections::VecDeque<[i32; 3]> = todo.into();
+    queue.extend(with(|s| std::mem::take(&mut s.mesh.marks_queue)));
+    while let Some(k) = queue.pop_front() {
+        let snap = world_section(game, k);
+        if with(|s| s.mesh.marks.get(&k).is_some_and(|(old, _)| same_section(old, &snap))) {
+            continue;
+        }
+        let (quads, n) = build_marks(game, k);
+        // Over the limit: the farthest make room for nearer ones; if none is farther, this is as
+        // far as it goes, until the player moves.
+        let fits = with(|s| {
+            let old = s.mesh.marks.get(&k).map_or(0, |(_, n)| *n);
+            while s.mesh.marks_count - old + n > MAX_MARKS {
+                let far = s.mesh.marks.iter().filter(|(q, (_, m))| **q != k && *m > 0).map(|(q, _)| *q).max_by_key(|&q| dist(q));
+                let Some(far) = far.filter(|&q| dist(q) > dist(k)) else {
+                    s.mesh.marks_full = true;
+                    return false;
+                };
+                if let Some((_, m)) = s.mesh.marks.remove(&far) {
+                    s.mesh.marks_count -= m;
+                }
+                s.mesh.marks_full = true;
+                bridge::put_marks(far, Vec::new());
+            }
+            s.mesh.marks_count = s.mesh.marks_count - old + n;
+            s.mesh.marks.insert(k, (snap, n));
+            true
+        });
+        if !fits {
+            queue.clear();
+            break;
+        }
+        bridge::put_marks(k, quads);
+        if start.elapsed() > MARKS_BUDGET {
+            break;
+        }
+    }
+    with(|s| s.mesh.marks_queue = queue);
+}
+
+/// The highlights of section `k`: a box over each block to mark, seen through everything, and how
+/// many there are. Missing and wrong go by the item wanted there, as the material list counts.
+fn build_marks(game: &Game<'_>, k: [i32; 3]) -> (Vec<Vertex>, usize) {
+    let mut quads = Vec::new();
+    let white = horizon_client::gfx::lightning::white_uv(&game.gui.atlas.font.white());
+    let mut count = 0;
+    with(|s| {
+        let Some((lo, hi)) = s.shown_bounds() else { return };
+        let anchor = s.mesh.anchor;
+        let (missing, wrong) = (s.settings.highlight_missing, s.settings.highlight_wrong);
+        let hide_fluids = s.settings.hide_fluids;
+        let only = s.highlight_item.clone();
+        let layer = s.layer;
+        let a = [0, 1, 2].map(|i| (k[i] * 16).max(lo[i]));
+        let b = [0, 1, 2].map(|i| (k[i] * 16 + 15).min(hi[i]));
+        for y in a[1]..=b[1] {
+            if !layer.contains(y) {
+                continue;
+            }
+            for z in a[2]..=b[2] {
+                for x in a[0]..=b[0] {
+                    let w = [x, y, z];
+                    if !loaded(game, w) {
+                        continue;
+                    }
+                    let Some((status, at, res)) = quick_status(game, s, w) else { continue };
+                    let argb = match status {
+                        Status::Missing if missing => 0x8033_B3E6u32,
+                        Status::WrongBlock if wrong => 0x80FF_3333,
+                        Status::WrongState if wrong => 0x80FF_9010,
+                        _ => continue,
+                    };
+                    if hide_fluids && res.fluid != 0 {
+                        continue;
+                    }
+                    if let Some(only) = &only {
+                        let wanted = s.state_of(at).clone();
+                        if item_for(game, s, &wanted).as_ref() != Some(only) {
+                            continue;
+                        }
+                    }
+                    let lo = [0, 1, 2].map(|i| (w[i] - anchor[i]) as f32 - 0.01);
+                    let start = quads.len();
+                    push_box(&mut quads, white, lo, lo.map(|v| v + 1.02), argb);
+                    // Outward normals in `push_box`'s order: only the near faces are drawn, so a
+                    // block's far side doesn't darken it.
+                    const OUT: [[i8; 4]; 6] =
+                        [[0, 127, 0, 127], [0, -127, 0, 127], [0, 0, -127, 127], [0, 0, 127, 127], [-127, 0, 0, 127], [127, 0, 0, 127]];
+                    for (face, q) in quads[start..].chunks_exact_mut(4).enumerate() {
+                        for v in q {
+                            v.normal = OUT[face];
+                        }
+                    }
+                    count += 1;
+                }
+            }
+        }
+    });
+    (quads, count)
 }
 
 /// Hands the area selection's frame to the render side when it changed: the box's edges, corner 1
@@ -2743,12 +3132,13 @@ fn printer_step(game: &mut Game<'_>) {
     let feet = [eye[0].floor() as i32, (eye[1] - 1.62).floor() as i32, eye[2].floor() as i32];
 
     // Everything there is to do in reach, bottom up and nearest first...
-    let mut jobs: Vec<(u8, usize, [i32; 3], BlockState, Job)> = Vec::new();
+    let mut jobs: Vec<(u8, bool, i32, bool, usize, [i32; 3], BlockState, Job)> = Vec::new();
+    let held = game.inventory.get(game.selected).and_then(Option::as_ref).map(|st| st.item.to_string());
     let mut waiting = None;
+    let mut unsupported = 0usize;
+    let mut pillar = None;
+    let mut stuck = 0usize;
     for (order, p) in printer::positions_in_reach(eye, reach).into_iter().enumerate() {
-        if jobs.len() >= 256 {
-            break;
-        }
         if !layer.contains(p[1]) || !loaded(game, p) || with(|s| s.recent.blocked(p, now, settings.retry_ticks)) {
             continue;
         }
@@ -2756,6 +3146,7 @@ fn printer_step(game: &mut Game<'_>) {
         if wanted.is_air() || matches!(wanted.name.as_str(), "minecraft:water" | "minecraft:lava" | "minecraft:bubble_column") {
             continue;
         }
+        let mut needs_air = false;
         let job = match status {
             Status::Missing => {
                 // The other half of a door or bed comes with its first half.
@@ -2792,6 +3183,22 @@ fn printer_step(game: &mut Game<'_>) {
                         continue;
                     }
                 }
+                // No real block with a face in view: without air place it can only wait for one,
+                // so it costs no more than this look.
+                needs_air = !has_support(game, eye, reach, p, &wanted);
+                if needs_air && !settings.air_place {
+                    unsupported += 1;
+                    if pillar.is_none()
+                        && let Some(axis) = wanted.prop("axis")
+                        && has_support(game, eye, reach, p, &BlockState::air())
+                    {
+                        pillar = Some(format!(
+                            "{} at {} {} {} only goes against a block on its {axis} side, with that face in view",
+                            short(&wanted.name), p[0], p[1], p[2]
+                        ));
+                    }
+                    continue;
+                }
                 Job::Place
             }
             Status::WrongState => {
@@ -2807,19 +3214,66 @@ fn printer_step(game: &mut Game<'_>) {
             }
             _ => continue,
         };
-        jobs.push((printer::place_class(&wanted), order, p, wanted, job));
+        if !matches!(job, Job::Adjust(_))
+            && with(|s| {
+                let key = stuck_key(game, s, eye, p, &wanted);
+                s.stuck.holds(p, key, now)
+            })
+        {
+            stuck += 1;
+            continue;
+        }
+        let other_item = with(|s| item_for(game, s, &wanted)) != held;
+        jobs.push((printer::place_class(&wanted), needs_air, p[1], other_item, order, p, wanted, job));
     }
-    // ...done in redstone's order: plain blocks, then what carries a signal, then what makes one.
-    jobs.sort_by_key(|(class, order, ..)| (*class, *order));
+    // ...done in redstone's order: plain blocks, then what carries a signal, then what makes one;
+    // within that, what has a real block to click against before what needs air place, bottom up,
+    // and in each layer what the hand already holds (a change of hand costs a tick), nearest first.
+    jobs.sort_by_key(|(class, needs_air, y, other_item, order, ..)| (*class, *needs_air, *y, *other_item, *order));
 
-    let mut note = waiting.unwrap_or_default();
-    for (_, _, p, wanted, job) in jobs.into_iter().take(12) {
+    let mut note = waiting.or(pillar).unwrap_or_else(|| {
+        if unsupported > 0 {
+            format!("{unsupported} block{} wait for a neighbour to click against (air place is off)", if unsupported == 1 { "" } else { "s" })
+        } else if stuck > 0 {
+            format!("{stuck} block{} can't be placed as wanted from where you stand", if stuck == 1 { "" } else { "s" })
+        } else {
+            String::new()
+        }
+    });
+    let deadline = std::time::Instant::now() + PRINT_BUDGET;
+    for (.., p, wanted, job) in jobs {
+        if std::time::Instant::now() > deadline {
+            break;
+        }
         let item = match &job {
             Job::Adjust(_) => None,
             _ => match with(|s| item_for(game, s, &wanted)) {
                 Some(item) => Some(item),
                 None => continue,
             },
+        };
+        if let Some(item) = &item
+            && let Err(e) = can_take(game, item)
+        {
+            note = format!("{}: {e}", short(item));
+            with(|s| s.recent.mark(p, now));
+            continue;
+        }
+        // The aim first: it only asks what a click would place, with no need of the item in hand,
+        // so a block that can't be placed yet doesn't cost a change of hand and a tick.
+        let click = match (&job, &item) {
+            (Job::Place, Some(item)) => aim_for(game, eye, reach, p, &wanted, item, settings.air_place),
+            (Job::Stack, Some(item)) => aim_stack(game, eye, reach, p, &wanted, item, settings.air_place),
+            (Job::Adjust(_), _) => aim_block(game, eye, reach, p),
+            _ => None,
+        };
+        let Some(click) = click else {
+            with(|s| {
+                let key = stuck_key(game, s, eye, p, &wanted);
+                s.stuck.mark(p, key, now);
+            });
+            note = format!("no way to place {} at {} {} {} as wanted", short(&wanted.name), p[0], p[1], p[2]);
+            continue;
         };
         if let Some(item) = &item {
             match select(game, item) {
@@ -2838,17 +3292,6 @@ fn printer_step(game: &mut Game<'_>) {
                 Ok(_) => {}
             }
         }
-        let click = match (&job, &item) {
-            (Job::Place, Some(item)) => aim_for(game, eye, reach, p, &wanted, item, settings.air_place),
-            (Job::Stack, Some(item)) => aim_stack(game, eye, reach, p, &wanted, item, settings.air_place),
-            (Job::Adjust(_), _) => aim_block(game, eye, reach, p),
-            _ => None,
-        };
-        let Some(click) = click else {
-            with(|s| s.recent.mark(p, now));
-            note = format!("no way to place {} at {} {} {} as wanted", short(&wanted.name), p[0], p[1], p[2]);
-            continue;
-        };
         if let Err(e) = do_click(game, &click) {
             with(|s| s.printer_note = format!("click failed: {e}"));
             return;
@@ -2926,23 +3369,72 @@ fn send_look(game: &Game<'_>, yaw: f32, pitch: f32) {
     }));
 }
 
+/// Whether `item` can be put in hand: it is in the hotbar, or the player is in creative.
+fn can_take(game: &Game<'_>, item: &str) -> Result<(), String> {
+    if game.creative || (0..9).any(|i| game.inventory[i].as_ref().is_some_and(|s| &*s.item == item)) {
+        return Ok(());
+    }
+    Err(if game.inventory.iter().flatten().any(|s| &*s.item == item) {
+        "in the inventory but not the hotbar".into()
+    } else {
+        "none carried".into()
+    })
+}
+
+/// Whether the block at `support` can be clicked to place against it. Sneaking lets chests, doors
+/// and the like be clicked without opening them.
+fn clickable(game: &Game<'_>, support: [i32; 3], sneak: bool) -> bool {
+    let sid = game.world.block(support[0], support[1], support[2]);
+    let facts = game.res.facts();
+    let sf = facts.get(sid);
+    !(facts.is_air(sid)
+        || sf.replaceable
+        || sf.outline.is_empty()
+        || (!sneak && interactive(&sf.name)))
+}
+
+/// Whether `p` is empty, so a click can only come through one of its neighbours' faces (grass or
+/// snow there can be clicked itself).
+fn is_open(game: &Game<'_>, p: [i32; 3]) -> bool {
+    game.res.facts().is_air(game.world.block(p[0], p[1], p[2]))
+}
+
+/// Whether a real neighbour of `p` shows the eye a face to click (`aim_for` finds out whether it
+/// gives the state wanted). On a server the click isn't made sneaking.
+fn has_support(game: &Game<'_>, eye: [f64; 3], reach: f64, p: [i32; 3], wanted: &BlockState) -> bool {
+    let sneak = game.remote.is_none();
+    let open = is_open(game, p);
+    printer::FACES.iter().any(|&f| {
+        (!open || (printer::face_fits(wanted, f) && printer::face_in_view(eye, reach, p, f)))
+            && clickable(game, [p[0] + f[0], p[1] + f[1], p[2] + f[2]], sneak)
+    })
+}
+
+/// What decides whether a block can be placed from here: where the eye is (to a quarter block), the
+/// spot and its neighbours, and what is wanted there.
+fn stuck_key(game: &Game<'_>, s: &mut State, eye: [f64; 3], p: [i32; 3], wanted: &BlockState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    eye.map(|v| (v * 4.0).floor() as i64).hash(&mut h);
+    game.world.block(p[0], p[1], p[2]).0.hash(&mut h);
+    for f in printer::FACES {
+        game.world.block(p[0] + f[0], p[1] + f[1], p[2] + f[2]).0.hash(&mut h);
+    }
+    wanted_id(game, s, wanted).map(|id| id.0).hash(&mut h);
+    h.finish()
+}
+
 /// Puts `item` in hand from the hotbar. In creative only the hotbar is used: an empty slot, or
 /// one whose item the schematic doesn't need any more, or the one the printer used longest ago,
 /// gets the item (the rest of the inventory stays as it is). Whether the hand changed.
 fn select(game: &mut Game<'_>, item: &str) -> Result<bool, String> {
     let now = game.ticks;
+    can_take(game, item)?;
     if let Some(i) = (0..9).find(|&i| game.inventory[i].as_ref().is_some_and(|s| &*s.item == item)) {
         let changed = game.selected != i;
         game.selected = i;
         with(|s| s.hotbar_used[i] = now);
         return Ok(changed);
-    }
-    if !game.creative {
-        return Err(if game.inventory.iter().flatten().any(|s| &*s.item == item) {
-            "in the inventory but not the hotbar".into()
-        } else {
-            "none carried".into()
-        });
     }
     let needed: std::collections::HashSet<String> = with(|s| {
         let Some(slot) = s.sel() else { return Default::default() };
@@ -3023,18 +3515,11 @@ fn aim_for(game: &mut Game<'_>, eye: [f64; 3], reach: f64, p: [i32; 3], wanted: 
     let wanted_id = with(|s| wanted_id(game, s, wanted))?;
     const OFFSETS: [f64; 5] = [0.0, -0.3, 0.3, -0.42, 0.42];
     let sneaks: &[bool] = if game.remote.is_some() { &[false] } else { &[false, true] };
+    let open = is_open(game, p);
     for &sneak in sneaks {
         for f in printer::FACES {
             let support = [p[0] + f[0], p[1] + f[1], p[2] + f[2]];
-            let sid = game.world.block(support[0], support[1], support[2]);
-            let facts = game.res.facts();
-            let sf = facts.get(sid);
-            if facts.is_air(sid)
-                || sf.replaceable
-                || (sf.fluid != horizon_client::blocks::Fluid::None && !sf.waterlogged)
-                || sf.outline.is_empty()
-                || (!sneak && interactive(&sf.name))
-            {
+            if (open && !(printer::face_fits(wanted, f) && printer::face_in_view(eye, reach, p, f))) || !clickable(game, support, sneak) {
                 continue;
             }
             // The face of `support` that touches `p`.
@@ -3243,7 +3728,15 @@ pub(super) fn mouse(game: &mut Game<'_>, button: winit::event::MouseButton, pres
     if !pressed {
         return with(|s| std::mem::take(&mut s.tool_down[b]));
     }
-    if !game.native_on(ID) || !game.native_playing() || !tool_held(game) {
+    if !game.native_on(ID) || !game.native_playing() {
+        return false;
+    }
+    if !tool_held(game) {
+        // Middle click on a block the schematic still wants: that block, as the game's own pick.
+        if b == 2 && pick_wanted(game) {
+            with(|s| s.tool_down[b] = true);
+            return true;
+        }
         return false;
     }
     with(|s| s.tool_down[b] = true);
@@ -3280,6 +3773,90 @@ pub(super) fn mouse(game: &mut Game<'_>, button: winit::event::MouseButton, pres
         };
     });
     true
+}
+
+/// The first block along the view within reach that a shown placement wants and the world doesn't
+/// have yet, up to and with the first real block. The cell the eye is in doesn't count: the player
+/// is inside that one.
+fn wanted_in_view(game: &Game<'_>) -> Option<BlockState> {
+    let (origin, dir) = game.aim()?;
+    let reach = game.reach();
+    let limit = game
+        .clip_ray(origin, dir, reach)
+        .map_or(reach, |h| (0..3).map(|i| (h.point[i] - origin[i]).powi(2)).sum::<f64>().sqrt());
+    let layer = with(|s| s.layer);
+    let cell_at = |t: f64| [0, 1, 2].map(|i| (origin[i] + dir[i] * t).floor() as i32);
+    let mut last = cell_at(0.0);
+    let mut t = 0.0;
+    while t < limit {
+        t = (t + 0.02).min(limit);
+        let cell = cell_at(t);
+        if cell == last {
+            continue;
+        }
+        last = cell;
+        if !layer.contains(cell[1]) {
+            continue;
+        }
+        let Some((status, wanted)) = with(|s| status_at(game, s, cell)) else { continue };
+        if status != Status::Correct
+            && !wanted.is_air()
+            && !matches!(wanted.name.as_str(), "minecraft:water" | "minecraft:lava" | "minecraft:bubble_column")
+        {
+            return Some(wanted);
+        }
+    }
+    None
+}
+
+/// Takes the block the schematic wants where the player looks, like the game's own pick block: from
+/// the hotbar, from the inventory into the hotbar, or in creative out of nothing. Whether the click
+/// was taken: not with the overlay off, nor when it isn't on such a block (the game's own pick).
+fn pick_wanted(game: &mut Game<'_>) -> bool {
+    if game.spectator() || !with(|s| s.settings.render && s.slots.iter().any(|x| x.shown)) || game.pick_entity_hit().is_some() {
+        return false;
+    }
+    let Some(wanted) = wanted_in_view(game) else { return false };
+    let Some(item) = with(|s| item_for(game, s, &wanted)) else { return false };
+    if let Err(e) = take_in_hand(game, &item) {
+        say(game, &format!("{}: {e}", short(&item)));
+    }
+    true
+}
+
+/// Puts `item` in hand as the game's pick block does (`pick_item`), on a server with the click that
+/// swaps a stack of the inventory into the hotbar.
+fn take_in_hand(game: &mut Game<'_>, item: &str) -> Result<(), String> {
+    use horizon_client::items::ItemStack;
+    game.select_queued_hotbar();
+    if let Some(slot) = (0..9).find(|&i| game.inventory[i].as_ref().is_some_and(|s| &*s.item == item)) {
+        game.selected = slot;
+        return Ok(());
+    }
+    if game.creative {
+        horizon_client::pick_item::pick(&mut game.inventory[..36], &mut game.selected, &ItemStack::new(item, 1), true);
+        return Ok(());
+    }
+    let Some(slot) = (9..36).find(|&i| game.inventory[i].as_ref().is_some_and(|s| &*s.item == item)) else {
+        return Err("none carried".into());
+    };
+    // `getSuitableHotbarSlot`: from the selected slot on, an empty one, else one without enchantments.
+    let from = game.selected;
+    let order = (0..9).map(|i| (from + i) % 9);
+    let hotbar = order
+        .clone()
+        .find(|&i| game.inventory[i].is_none())
+        .or_else(|| order.clone().find(|&i| game.inventory[i].as_ref().is_some_and(|s| s.enchantments().is_empty())))
+        .unwrap_or(from);
+    if game.remote.is_some() {
+        if !game.remote_menu_ops(&[(Some(slot), hotbar as i32, horizon_client::menu::Input::Swap)]) {
+            return Err("the inventory can't be changed right now".into());
+        }
+    } else {
+        game.inventory.swap(hotbar, slot);
+    }
+    game.selected = hotbar;
+    Ok(())
 }
 
 /// The placement looked at: the nearest box the view enters (inside two, the smaller).
@@ -3782,6 +4359,17 @@ fn inventory_counts(game: &Game<'_>) -> BTreeMap<String, u64> {
     m
 }
 
+/// Puts the selected placement's material list on the clipboard, as a table a spreadsheet takes.
+fn copy_materials(game: &mut Game<'_>) -> Result<Vec<String>, String> {
+    use horizon_client::clipboard::Clipboard;
+    let list = material_list(game);
+    if list.is_empty() {
+        return Err("no schematic loaded, or it needs no items".into());
+    }
+    game.clipboard.set(&materials::table(&list, pretty_item));
+    Ok(vec![format!("Material list copied ({} kinds): paste it into a spreadsheet", list.len())])
+}
+
 fn material_list(game: &Game<'_>) -> Vec<Material> {
     let inv = inventory_counts(game);
     with(|s| {
@@ -3848,6 +4436,10 @@ pub(super) fn hud(game: &mut Game<'_>, batch: &mut HudBatch, corners: &mut Corne
             if !s.printer_note.is_empty() {
                 l.push((s.printer_note.clone(), 0xAAAAAA));
             }
+        }
+        if s.settings.highlight_missing || s.settings.highlight_wrong {
+            let nearest = if s.mesh.marks_full { " (the nearest only)" } else { "" };
+            l.push((format!("{} · {}{nearest}", highlight_text(s), s.mesh.marks_count), 0x55FFFF));
         }
         if let Some(d) = area {
             l.push((format!("Area: {} x {} x {}", d[0], d[1], d[2]), 0xE0E0E0));
@@ -4649,6 +5241,10 @@ fn tab_materials(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
             save_settings(game, &s.settings);
         });
     }
+    let tip = ["Copies the list as a table: paste it into a spreadsheet"];
+    if ui.button_tip(game, [r[0] + r[2] - bw - 74.0, r[1], 70.0, 20.0], "Copy", !list.is_empty(), &tip) {
+        act(game, &["materials", "copy"]);
+    }
     let fetch: u64 = list.iter().map(|m| m.to_fetch()).sum();
     let summary = if list.is_empty() {
         "No schematic loaded, or it needs no items.".to_string()
@@ -4656,7 +5252,29 @@ fn tab_materials(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
         format!("{} kinds, {} items still to fetch", list.len(), fetch)
     };
     ui.text(game, r[0], r[1] + 6.0, &summary, 0xE0E0E0);
-    let table = [r[0], r[1] + 26.0, r[2], r[3] - 26.0];
+    // The highlights: what they mark, and a row of the list below picks one item.
+    let (missing, wrong, only) = with(|s| (s.settings.highlight_missing, s.settings.highlight_wrong, s.highlight_item.clone()));
+    let on_off_text = |on: bool| if on { "ON" } else { "OFF" };
+    ui.text(game, r[0], r[1] + 30.0, "Highlight", 0xE0E0E0);
+    let toggle = |game: &mut Game<'_>, change: &dyn Fn(&mut Settings)| {
+        with(|s| {
+            change(&mut s.settings);
+            save_settings(game, &s.settings);
+        });
+    };
+    let tip = ["Marks them through everything, however far"];
+    if ui.button_tip(game, [r[0] + 52.0, r[1] + 24.0, 86.0, 20.0], &format!("Missing: {}", on_off_text(missing)), true, &tip) {
+        toggle(game, &|st: &mut Settings| st.highlight_missing = !st.highlight_missing);
+    }
+    if ui.button_tip(game, [r[0] + 142.0, r[1] + 24.0, 80.0, 20.0], &format!("Wrong: {}", on_off_text(wrong)), true, &tip) {
+        toggle(game, &|st: &mut Settings| st.highlight_wrong = !st.highlight_wrong);
+    }
+    let shown = only.as_deref().map_or_else(|| "All items".to_string(), pretty_item);
+    let tip = ["Click a row below to mark only that item, again to mark all"];
+    if ui.button_tip(game, [r[0] + 226.0, r[1] + 24.0, r[2] - 226.0, 20.0], &shown, only.is_some(), &tip) {
+        with(|s| s.highlight_item = None);
+    }
+    let table = [r[0], r[1] + 48.0, r[2], r[3] - 48.0];
     let cols = [table[0] + table[2] - 150.0, table[0] + table[2] - 90.0, table[0] + table[2] - 12.0];
     ui.text(game, table[0] + 24.0, table[1], "Item", 0xFFFFFF);
     ui.text_right(game, cols[0], table[1], "Missing", 0xFFFFFF);
@@ -4677,9 +5295,22 @@ fn tab_materials(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
             ui.fill(game, row, 0x18FF_FFFF);
         }
         let name = pretty_item(&m.item);
-        if ui.hovered(row) {
+        if only.as_deref() == Some(m.item.as_str()) {
+            ui.fill(game, row, 0x5055_FFFF);
+        }
+        if ui.hovered(row) && ui.hovered(area) {
             ui.fill(game, row, 0x25FF_FFFF);
-            ui.tooltip(&[&name, &format!("{} still to fetch", m.to_fetch()), &m.item]);
+            ui.tooltip(&[&name, &format!("{} still to fetch", m.to_fetch()), "Click: highlight only this", &m.item]);
+        }
+        if ui.clicked(row) && ui.hovered(area) {
+            with(|s| {
+                let again = s.highlight_item.as_deref() == Some(m.item.as_str());
+                s.highlight_item = (!again).then(|| m.item.clone());
+                if !again && !s.settings.highlight_wrong {
+                    s.settings.highlight_missing = true;
+                }
+                save_settings(game, &s.settings);
+            });
         }
         ui.item(game, row[0] + 2.0, y + 1.0, &m.item, 16.0);
         ui.text_fit(game, row[0] + 23.0, y + 5.0, cols[0] - row[0] - 80.0, &name, 0xE0E0E0);

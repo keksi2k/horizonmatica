@@ -19,7 +19,7 @@ pub struct PrinterSettings {
 
 impl Default for PrinterSettings {
     fn default() -> Self {
-        Self { interval: 2, reach: 4.5, retry_ticks: 20, only_layer: true, air_place: true }
+        Self { interval: 2, reach: 4.5, retry_ticks: 20, only_layer: true, air_place: false }
     }
 }
 
@@ -68,6 +68,51 @@ impl Recent {
     }
 }
 
+/// Blocks no click could place, and what they looked like then. Nothing is tried again until
+/// something that matters changed (`key`: where the player stands, the block and its neighbours),
+/// or after `STUCK_TICKS` for what `key` can't see, like a block taken away in the line of sight.
+#[derive(Default)]
+pub struct Stuck {
+    at: HashMap<[i32; 3], (u64, u64)>,
+}
+
+pub const STUCK_TICKS: u64 = 200;
+
+impl Stuck {
+    pub fn holds(&self, p: [i32; 3], key: u64, now: u64) -> bool {
+        self.at.get(&p).is_some_and(|&(k, t)| k == key && now < t + STUCK_TICKS)
+    }
+    pub fn mark(&mut self, p: [i32; 3], key: u64, now: u64) {
+        self.at.insert(p, (key, now));
+        if self.at.len() > 4096 {
+            self.at.retain(|_, &mut (_, t)| now < t + STUCK_TICKS);
+        }
+    }
+    pub fn clear(&mut self) {
+        self.at.clear();
+    }
+}
+
+/// Whether the eye can see the face that the neighbour at `p + f` turns to `p`, within `reach`: it
+/// has to be on `p`'s side of that face. No ray is needed to know the others can't be clicked.
+pub fn face_in_view(eye: [f64; 3], reach: f64, p: [i32; 3], f: [i32; 3]) -> bool {
+    let Some(axis) = f.iter().position(|&v| v != 0) else { return false };
+    let plane = f64::from(p[axis]) + if f[axis] > 0 { 1.0 } else { 0.0 };
+    let front = if f[axis] > 0 { eye[axis] < plane } else { eye[axis] > plane };
+    // The nearest point of the face.
+    let dist2: f64 = (0..3)
+        .map(|i| {
+            let d = if i == axis {
+                plane - eye[i]
+            } else {
+                eye[i] - eye[i].clamp(f64::from(p[i]), f64::from(p[i]) + 1.0)
+            };
+            d * d
+        })
+        .sum();
+    front && dist2 <= reach * reach
+}
+
 /// The six faces as (offset to the neighbour).
 pub const FACES: [[i32; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
 
@@ -82,6 +127,17 @@ pub fn look_candidates() -> Vec<(f32, f32)> {
         }
     }
     out
+}
+
+/// Whether a click on face `f` can give `state` its direction: a log, froglight or other pillar
+/// takes its `axis` from the clicked face alone, whatever the look.
+pub fn face_fits(state: &crate::BlockState, f: [i32; 3]) -> bool {
+    match state.prop("axis") {
+        Some("x") => f[0] != 0,
+        Some("y") => f[1] != 0,
+        Some("z") => f[2] != 0,
+        _ => true,
+    }
 }
 
 /// When the printer places a block, so that redstone doesn't fire while it is built: plain
@@ -160,6 +216,40 @@ mod tests {
         assert!(r.blocked([1, 2, 3], 110, 20));
         assert!(!r.blocked([1, 2, 3], 120, 20));
         assert!(!r.blocked([0, 0, 0], 110, 20));
+    }
+
+    #[test]
+    fn stuck_until_something_changes() {
+        let mut s = Stuck::default();
+        s.mark([1, 2, 3], 7, 100);
+        assert!(s.holds([1, 2, 3], 7, 150));
+        assert!(!s.holds([1, 2, 3], 8, 150), "something around it changed");
+        assert!(!s.holds([1, 2, 3], 7, 100 + STUCK_TICKS), "tried again in time");
+        assert!(!s.holds([0, 0, 0], 7, 150));
+    }
+
+    #[test]
+    fn faces_the_eye_can_see() {
+        let p = [0, 64, 0];
+        let down = [0, -1, 0];
+        // The top of the block below: seen from above, not from below it.
+        assert!(face_in_view([0.5, 66.0, 0.5], 4.5, p, down));
+        assert!(!face_in_view([0.5, 63.0, 0.5], 4.5, p, down));
+        // The block to the east turns its west side to `p`: seen from the west only.
+        assert!(face_in_view([-2.0, 64.5, 0.5], 4.5, p, [1, 0, 0]));
+        assert!(!face_in_view([3.0, 64.5, 0.5], 4.5, p, [1, 0, 0]));
+        // Too far.
+        assert!(!face_in_view([0.5, 74.0, 0.5], 4.5, p, down));
+    }
+
+    #[test]
+    fn pillars_take_their_axis_from_the_face() {
+        let pillar = |a: &str| crate::BlockState::new("minecraft:verdant_froglight", &[("axis", a)]);
+        assert!(face_fits(&pillar("y"), [0, -1, 0]));
+        assert!(!face_fits(&pillar("y"), [1, 0, 0]));
+        assert!(face_fits(&pillar("z"), [0, 0, 1]));
+        assert!(!face_fits(&pillar("z"), [0, -1, 0]));
+        assert!(face_fits(&crate::BlockState::new("minecraft:stone", &[]), [1, 0, 0]));
     }
 
     #[test]
