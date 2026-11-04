@@ -59,15 +59,24 @@ impl Tag {
             _ => None,
         }
     }
+    /// Takes `key` out of a compound (to keep a large array without copying it).
+    pub fn remove(&mut self, key: &str) -> Option<Tag> {
+        match self {
+            Tag::Compound(map) => map.remove(key),
+            _ => None,
+        }
+    }
 }
 
-/// Limits that keep a hostile file from exhausting memory or the stack.
+/// Limits that keep a hostile file from exhausting memory or the stack. Arrays are only as
+/// long as NBT allows (an i32 length); an array is allocated once its bytes are known to be there.
 const MAX_DEPTH: usize = 512;
-const MAX_ARRAY: usize = 1 << 28;
 
 struct Reader<'a> {
     data: &'a [u8],
     at: usize,
+    /// Long arrays are skipped (read as empty): enough to look at a file's metadata and sizes.
+    skip_longs: bool,
 }
 
 type R<T> = Result<T, String>;
@@ -102,11 +111,7 @@ impl<'a> Reader<'a> {
         if n < 0 {
             return Ok(0);
         }
-        let n = n as usize;
-        if n > MAX_ARRAY {
-            return Err("NBT: array too large".into());
-        }
-        Ok(n)
+        Ok(n as usize)
     }
     fn string(&mut self) -> R<String> {
         let n = self.u16()? as usize;
@@ -153,19 +158,17 @@ impl<'a> Reader<'a> {
             }
             11 => {
                 let n = self.len()?;
-                let mut v = Vec::with_capacity(n.min(1 << 20));
-                for _ in 0..n {
-                    v.push(self.i32()?);
-                }
-                Tag::IntArray(v)
+                let bytes = self.take(n * 4)?;
+                Tag::IntArray(bytes.chunks_exact(4).map(|c| i32::from_be_bytes(c.try_into().unwrap())).collect())
             }
             12 => {
                 let n = self.len()?;
-                let mut v = Vec::with_capacity(n.min(1 << 20));
-                for _ in 0..n {
-                    v.push(self.i64()?);
+                let bytes = self.take(n * 8)?;
+                if self.skip_longs {
+                    Tag::LongArray(Vec::new())
+                } else {
+                    Tag::LongArray(bytes.chunks_exact(8).map(|c| i64::from_be_bytes(c.try_into().unwrap())).collect())
                 }
-                Tag::LongArray(v)
             }
             k => return Err(format!("NBT: unknown tag type {k}")),
         })
@@ -174,7 +177,11 @@ impl<'a> Reader<'a> {
 
 /// Reads an uncompressed named root tag; returns its name and value.
 pub fn read(data: &[u8]) -> R<(String, Tag)> {
-    let mut r = Reader { data, at: 0 };
+    read_with(data, false)
+}
+
+fn read_with(data: &[u8], skip_longs: bool) -> R<(String, Tag)> {
+    let mut r = Reader { data, at: 0, skip_longs };
     let kind = r.u8()?;
     if kind == 0 {
         return Err("NBT: empty root".into());
@@ -186,9 +193,21 @@ pub fn read(data: &[u8]) -> R<(String, Tag)> {
 
 /// Reads a gzip-compressed (or, failing that, uncompressed) NBT file.
 pub fn read_file_bytes(bytes: &[u8], max_unpacked: usize) -> R<Tag> {
+    read_file_with(bytes, max_unpacked, false)
+}
+
+/// Like `read_file_bytes`, but every long array comes back empty: a large `.litematic`'s
+/// metadata and region sizes without holding its blocks.
+pub fn read_file_bytes_light(bytes: &[u8], max_unpacked: usize) -> R<Tag> {
+    read_file_with(bytes, max_unpacked, true)
+}
+
+fn read_file_with(bytes: &[u8], max_unpacked: usize, skip_longs: bool) -> R<Tag> {
     if bytes.starts_with(&[0x1f, 0x8b]) {
         use std::io::Read;
-        let mut out = Vec::new();
+        // gzip ends with the unpacked size (mod 2^32): room for it at once, not by doubling.
+        let hint = bytes.len().checked_sub(4).map_or(0, |at| u32::from_le_bytes(bytes[at..].try_into().unwrap()) as usize);
+        let mut out = Vec::with_capacity(hint.min(max_unpacked));
         flate2::read::GzDecoder::new(bytes)
             .take(max_unpacked as u64 + 1)
             .read_to_end(&mut out)
@@ -196,9 +215,9 @@ pub fn read_file_bytes(bytes: &[u8], max_unpacked: usize) -> R<Tag> {
         if out.len() > max_unpacked {
             return Err("file too large once unpacked".into());
         }
-        Ok(read(&out)?.1)
+        Ok(read_with(&out, skip_longs)?.1)
     } else {
-        Ok(read(bytes)?.1)
+        Ok(read_with(bytes, skip_longs)?.1)
     }
 }
 

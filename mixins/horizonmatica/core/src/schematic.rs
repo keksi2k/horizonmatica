@@ -98,6 +98,76 @@ pub struct Region {
     pub entity_count: usize,
 }
 
+/// Builds a region cell by cell straight into the packed array (no index per cell on the side):
+/// the array starts at 2 bits per entry and widens as the palette grows. Air is index 0, which
+/// every cell holds until it is set.
+#[derive(Clone, Debug)]
+pub struct RegionBuilder {
+    size: [i32; 3],
+    palette: Vec<BlockState>,
+    index: std::collections::HashMap<BlockState, u32>,
+    blocks: BitArray,
+    non_air: u64,
+}
+
+impl RegionBuilder {
+    pub fn new(size: [i32; 3]) -> Self {
+        let size = size.map(|v| v.max(1));
+        let volume = size.iter().map(|&v| v as u64).product();
+        let air = BlockState::air();
+        Self {
+            size,
+            palette: vec![air.clone()],
+            index: [(air, 0)].into_iter().collect(),
+            blocks: BitArray::new(2, volume),
+            non_air: 0,
+        }
+    }
+    /// The palette index of `state`, added when new (every kind of air is index 0).
+    pub fn intern(&mut self, state: BlockState) -> u32 {
+        if state.is_air() {
+            return 0;
+        }
+        if let Some(&i) = self.index.get(&state) {
+            return i;
+        }
+        let i = self.palette.len() as u32;
+        self.palette.push(state.clone());
+        self.index.insert(state, i);
+        self.blocks.widen(BitArray::bits_for(self.palette.len()));
+        i
+    }
+    /// Sets the cell at `local` (x fastest, then z, then y) to palette index `i` from `intern`.
+    pub fn set(&mut self, local: [i32; 3], i: u32) {
+        let [sx, _, sz] = self.size.map(|v| v as u64);
+        let at = local[1] as u64 * sx * sz + local[2] as u64 * sx + local[0] as u64;
+        let was = self.blocks.get(at);
+        self.non_air = self.non_air + u64::from(i != 0) - u64::from(was != 0);
+        self.blocks.set(at, i);
+    }
+    /// Cells that aren't air.
+    pub fn non_air(&self) -> u64 {
+        self.non_air
+    }
+    /// Palette entries without air.
+    pub fn states(&self) -> usize {
+        self.palette.len() - 1
+    }
+    pub fn finish(self, name: &str, block_entities: Vec<([i32; 3], Tag)>) -> Region {
+        Region {
+            name: name.into(),
+            position: [0; 3],
+            raw_size: self.size,
+            min: [0; 3],
+            size: self.size,
+            palette: self.palette,
+            blocks: self.blocks,
+            block_entities,
+            entity_count: 0,
+        }
+    }
+}
+
 impl Region {
     pub fn volume(&self) -> u64 {
         self.size.iter().map(|&v| v as u64).product()
@@ -114,6 +184,41 @@ impl Region {
         }
         let i = self.blocks.get(self.index(x, y, z));
         if (i as usize) < self.palette.len() { i } else { 0 }
+    }
+    /// How many cells use each palette entry (one pass over the packed array).
+    pub fn histogram(&self) -> Vec<u64> {
+        let mut h = vec![0u64; self.palette.len()];
+        for i in 0..self.volume() {
+            let v = self.blocks.get(i) as usize;
+            let n = h.len();
+            h[if v < n { v } else { 0 }] += 1;
+        }
+        h
+    }
+    /// Cells that are neither air nor structure void.
+    pub fn block_count(&self) -> u64 {
+        let h = self.histogram();
+        self.palette.iter().zip(h).filter(|(s, _)| !s.is_air() && !s.is_void()).map(|(_, n)| n).sum()
+    }
+    /// A region at the origin from a palette and its packed cells (Litematica's order).
+    pub(crate) fn from_bits(
+        name: &str,
+        size: [i32; 3],
+        palette: Vec<BlockState>,
+        blocks: BitArray,
+        block_entities: Vec<([i32; 3], Tag)>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            position: [0; 3],
+            raw_size: size,
+            min: [0; 3],
+            size,
+            palette,
+            blocks,
+            block_entities,
+            entity_count: 0,
+        }
     }
     pub fn state(&self, local: [i32; 3]) -> &BlockState {
         &self.palette[self.palette_index(local) as usize]
@@ -147,7 +252,7 @@ impl Region {
         }
     }
 
-    /// Builds a region in memory (tests, and future saving).
+    /// Builds a region in memory (tests).
     pub fn from_fn(
         name: &str,
         position: [i32; 3],
@@ -197,12 +302,13 @@ pub struct Schematic {
     pub regions: Vec<Region>,
 }
 
-/// Upper bound on a file's unpacked size.
-pub const MAX_UNPACKED: usize = 512 << 20;
-/// Upper bound on a region's volume (Litematica itself allows large areas; this keeps memory sane).
-pub const MAX_VOLUME: u64 = 256 * 1024 * 1024;
+/// Upper bound on a file's unpacked size: a region of `MAX_VOLUME` cells at 32 bits each.
+pub const MAX_UNPACKED: usize = 8 << 30;
+/// Upper bound on a region's volume, the same for saving and loading: 2^31 cells, so an index
+/// fits the long array's i32 length at any width (memory is the real limit: a few bits a cell).
+pub const MAX_VOLUME: u64 = 1 << 31;
 
-fn vec3(tag: Option<&Tag>) -> Option<[i32; 3]> {
+pub(crate) fn vec3(tag: Option<&Tag>) -> Option<[i32; 3]> {
     let t = tag?;
     Some([t.get("x")?.int()? as i32, t.get("y")?.int()? as i32, t.get("z")?.int()? as i32])
 }
@@ -223,10 +329,11 @@ pub(crate) fn read_state(tag: &Tag) -> Result<BlockState, String> {
 impl Schematic {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let root = nbt::read_file_bytes(bytes, MAX_UNPACKED)?;
-        Self::from_nbt(&root)
+        Self::from_nbt(root)
     }
 
-    pub fn from_nbt(root: &Tag) -> Result<Self, String> {
+    /// Takes the tree apart: each region's block array is kept, not copied.
+    pub fn from_nbt(mut root: Tag) -> Result<Self, String> {
         let version = root.get("Version").and_then(Tag::int).ok_or("not a .litematic file (no Version)")?;
         if !(1..=7).contains(&version) {
             return Err(format!("unsupported .litematic version {version}"));
@@ -246,9 +353,9 @@ impl Schematic {
             time_created: i("TimeCreated"),
             time_modified: i("TimeModified"),
         };
-        let regions_tag = root.get("Regions").and_then(Tag::compound).ok_or("no Regions")?;
+        let Some(Tag::Compound(regions_tag)) = root.remove("Regions") else { return Err("no Regions".into()) };
         let mut regions = Vec::new();
-        for (name, r) in regions_tag {
+        for (name, mut r) in regions_tag {
             let position = vec3(r.get("Position")).ok_or_else(|| format!("region {name}: no Position"))?;
             let raw_size = vec3(r.get("Size")).ok_or_else(|| format!("region {name}: no Size"))?;
             let size = raw_size.map(i32::abs);
@@ -268,9 +375,12 @@ impl Schematic {
                 .map(read_state)
                 .collect::<Result<_, _>>()?;
             let palette = if palette.is_empty() { vec![BlockState::air()] } else { palette };
-            let longs = r.get("BlockStates").and_then(Tag::longs).unwrap_or(&[]);
+            let longs = match r.remove("BlockStates") {
+                Some(Tag::LongArray(v)) => v,
+                _ => Vec::new(),
+            };
             let bits = BitArray::bits_for(palette.len());
-            let blocks = BitArray::from_longs(longs, bits, volume)
+            let blocks = BitArray::from_vec(longs, bits, volume)
                 .map_err(|e| format!("region {name}: {e}"))?;
             let block_entities = r
                 .get("TileEntities")
@@ -298,7 +408,8 @@ impl Schematic {
         Ok(Self { version, data_version, metadata, regions })
     }
 
-    /// Writes the schematic as a `.litematic` (gzip NBT, version 6).
+    /// Writes the schematic as a `.litematic`: gzip NBT, version 7 (sub-version 1), as Litematica
+    /// writes it since 1.20.5.
     pub fn to_bytes(&self) -> Vec<u8> {
         let v3 = |p: [i32; 3]| {
             Tag::Compound(BTreeMap::from([
@@ -355,7 +466,8 @@ impl Schematic {
         ]));
         let root = Tag::Compound(BTreeMap::from([
             ("MinecraftDataVersion".into(), Tag::Int(self.data_version as i32)),
-            ("Version".into(), Tag::Int(6)),
+            ("Version".into(), Tag::Int(7)),
+            ("SubVersion".into(), Tag::Int(1)),
             ("Metadata".into(), metadata),
             ("Regions".into(), Tag::Compound(regions)),
         ]));
@@ -380,16 +492,7 @@ impl Schematic {
 
     /// Non-air, non-void blocks in all regions.
     pub fn block_count(&self) -> u64 {
-        let mut n = 0;
-        for r in &self.regions {
-            let solid: Vec<bool> = r.palette.iter().map(|s| !s.is_air() && !s.is_void()).collect();
-            for i in 0..r.volume() {
-                if solid.get(r.blocks.get(i) as usize).copied().unwrap_or(false) {
-                    n += 1;
-                }
-            }
-        }
-        n
+        self.regions.iter().map(Region::block_count).sum()
     }
 }
 
@@ -435,6 +538,51 @@ mod tests {
         assert_eq!(r.state([0, 1, 0]).prop("facing"), Some("north"));
         assert!(r.state([1, 1, 1]).is_air());
         assert_eq!(back.block_count(), 3 * 4 + 1);
+    }
+
+    #[test]
+    fn builder_widens_and_round_trips() {
+        // 40 kinds of block: the array widens from 2 to 6 bits on the way.
+        let size = [7, 5, 6];
+        let mut b = RegionBuilder::new(size);
+        let kind = |x: i32, y: i32, z: i32| (x + 7 * z + 3 * y) % 41;
+        for y in 0..5 {
+            for z in 0..6 {
+                for x in 0..7 {
+                    let k = kind(x, y, z);
+                    let state = if k == 0 { BlockState::new("minecraft:cave_air", &[]) } else { BlockState::new(&format!("test:b{k}"), &[]) };
+                    let i = b.intern(state);
+                    b.set([x, y, z], i);
+                }
+            }
+        }
+        let air = (0..5).flat_map(|y| (0..6).flat_map(move |z| (0..7).map(move |x| (x, y, z)))).filter(|&(x, y, z)| kind(x, y, z) == 0).count() as u64;
+        assert_eq!(b.non_air(), 7 * 5 * 6 - air);
+        assert_eq!(b.states(), 40);
+        let s = Schematic { version: 7, data_version: 4000, metadata: Metadata::default(), regions: vec![b.finish("r", Vec::new())] };
+        let back = Schematic::from_bytes(&s.to_bytes()).unwrap();
+        let r = &back.regions[0];
+        assert_eq!(r.size, size);
+        for y in 0..5 {
+            for z in 0..6 {
+                for x in 0..7 {
+                    let k = kind(x, y, z);
+                    let name = if k == 0 { "minecraft:air".to_string() } else { format!("test:b{k}") };
+                    assert_eq!(r.state([x, y, z]).name, name, "at {x} {y} {z}");
+                }
+            }
+        }
+
+        // Counted in one pass; the light read (metadata, sizes) agrees with the full one.
+        let h = r.histogram();
+        assert_eq!(h.iter().sum::<u64>(), 7 * 5 * 6);
+        assert_eq!(h[0], air);
+        assert_eq!(r.block_count(), 7 * 5 * 6 - air);
+        let mut s = s;
+        s.metadata.total_blocks = (7 * 5 * 6 - air) as i64;
+        s.metadata.name = "Builder".into();
+        let info = crate::formats::summary(&s.to_bytes()).unwrap();
+        assert_eq!((info.name.as_str(), info.size, info.blocks, info.regions), ("Builder", size, 7 * 5 * 6 - air, 1));
     }
 
     #[test]

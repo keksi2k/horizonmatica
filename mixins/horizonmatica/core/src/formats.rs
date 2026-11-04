@@ -12,7 +12,8 @@
 //! game side brings them up to date with Horizon's data fixer.
 
 use crate::nbt::{self, Tag};
-use crate::schematic::{BlockState, MAX_UNPACKED, MAX_VOLUME, Metadata, Region, Schematic, read_state};
+use crate::bitarray::BitArray;
+use crate::schematic::{BlockState, MAX_UNPACKED, MAX_VOLUME, Metadata, Region, Schematic, read_state, vec3};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
@@ -50,7 +51,7 @@ pub fn load(bytes: &[u8]) -> Result<(Schematic, Format), String> {
     let root = nbt::read_file_bytes(bytes, MAX_UNPACKED)?;
     let format = detect(&root).ok_or("not a schematic (unknown format)")?;
     let schematic = match format {
-        Format::Litematic => Schematic::from_nbt(&root)?,
+        Format::Litematic => Schematic::from_nbt(root)?,
         Format::Sponge(v) => sponge(sponge_root(&root), v)?,
         Format::Structure => structure(&root)?,
         Format::McEdit => mcedit(&root)?,
@@ -60,6 +61,64 @@ pub fn load(bytes: &[u8]) -> Result<(Schematic, Format), String> {
 
 fn sponge_root(root: &Tag) -> &Tag {
     root.get("Schematic").filter(|t| t.compound().is_some()).unwrap_or(root)
+}
+
+/// What a file is, without keeping its blocks (shown before loading it).
+#[derive(Clone, Debug)]
+pub struct Summary {
+    pub name: String,
+    pub author: String,
+    pub format: Format,
+    pub size: [i32; 3],
+    pub blocks: u64,
+    pub regions: usize,
+}
+
+/// Reads what a file is. A `.litematic` tells it in its metadata, so its block arrays are
+/// skipped; other files (and a `.litematic` without a block count) are read in full.
+pub fn summary(bytes: &[u8]) -> Result<Summary, String> {
+    let light = nbt::read_file_bytes_light(bytes, MAX_UNPACKED)?;
+    if detect(&light) == Some(Format::Litematic) {
+        let m = light.get("Metadata");
+        let text = |k: &str| m.and_then(|m| m.get(k)).and_then(Tag::str).unwrap_or("").to_string();
+        let blocks = m.and_then(|m| m.get("TotalBlocks")).and_then(Tag::int).unwrap_or(0);
+        let regions = light.get("Regions").and_then(Tag::compound);
+        if blocks > 0
+            && let Some(regions) = regions
+        {
+            let mut lo = [i32::MAX; 3];
+            let mut hi = [i32::MIN; 3];
+            for r in regions.values() {
+                let (Some(p), Some(s)) = (vec3(r.get("Position")), vec3(r.get("Size"))) else { continue };
+                for i in 0..3 {
+                    let end = p[i] + if s[i] >= 0 { s[i] - 1 } else { s[i] + 1 };
+                    lo[i] = lo[i].min(p[i].min(end));
+                    hi[i] = hi[i].max(p[i].max(end));
+                }
+            }
+            if lo[0] <= hi[0] {
+                return Ok(Summary {
+                    name: text("Name"),
+                    author: text("Author"),
+                    format: Format::Litematic,
+                    size: [0, 1, 2].map(|i| hi[i] - lo[i] + 1),
+                    blocks: blocks as u64,
+                    regions: regions.len(),
+                });
+            }
+        }
+    }
+    drop(light);
+    let (s, format) = load(bytes)?;
+    let (lo, hi) = s.bounds();
+    Ok(Summary {
+        name: s.metadata.name.clone(),
+        author: s.metadata.author.clone(),
+        format,
+        size: [0, 1, 2].map(|i| hi[i] - lo[i] + 1),
+        blocks: if s.metadata.total_blocks > 0 { s.metadata.total_blocks as u64 } else { s.block_count() },
+        regions: s.regions.len(),
+    })
 }
 
 pub fn detect(root: &Tag) -> Option<Format> {
@@ -128,17 +187,7 @@ fn cell(size: [i32; 3], p: [i32; 3]) -> usize {
 }
 
 fn finish(name: String, author: String, data_version: i64, region: Region) -> Schematic {
-    let solid = region.palette.iter().map(|s| !s.is_air() && !s.is_void()).collect::<Vec<_>>();
-    let mut total_blocks = 0i64;
-    for y in 0..region.size[1] {
-        for z in 0..region.size[2] {
-            for x in 0..region.size[0] {
-                if solid[region.palette_index([x, y, z]) as usize] {
-                    total_blocks += 1;
-                }
-            }
-        }
-    }
+    let total_blocks = region.block_count() as i64;
     let metadata = Metadata {
         name,
         author,
@@ -196,9 +245,10 @@ fn sponge(s: &Tag, version: u8) -> Result<Schematic, String> {
         remap.insert(idx, palette.id(state));
     }
     let Some(Tag::ByteArray(data)) = data_tag else { return Err("no block data".into()) };
-    let mut indices = Vec::with_capacity(volume);
+    // The palette is known up front: cells go straight into an array of its width.
+    let mut blocks = BitArray::new(BitArray::bits_for(palette.states.len()), volume as u64);
     let mut bytes = data.iter().map(|&b| b as u8);
-    while indices.len() < volume {
+    for i in 0..volume as u64 {
         // Unsigned LEB128 varints.
         let mut value = 0i64;
         let mut shift = 0;
@@ -213,7 +263,10 @@ fn sponge(s: &Tag, version: u8) -> Result<Schematic, String> {
                 return Err("bad varint in block data".into());
             }
         }
-        indices.push(*remap.get(&value).ok_or_else(|| format!("block data names palette entry {value}"))?);
+        let id = *remap.get(&value).ok_or_else(|| format!("block data names palette entry {value}"))?;
+        if id != 0 {
+            blocks.set(i, id);
+        }
     }
     let block_entities = entities_tag
         .and_then(Tag::list)
@@ -224,7 +277,7 @@ fn sponge(s: &Tag, version: u8) -> Result<Schematic, String> {
     let meta = s.get("Metadata");
     let text = |k: &str| meta.and_then(|m| m.get(k)).and_then(Tag::str).unwrap_or("").to_string();
     let data_version = s.get("DataVersion").and_then(Tag::int).unwrap_or(SPONGE_V1_DATA_VERSION);
-    let region = Region::from_indices("Main", size, palette.states, &indices, block_entities);
+    let region = Region::from_bits("Main", size, palette.states, blocks, block_entities);
     Ok(finish(text("Name"), text("Author"), data_version, region))
 }
 

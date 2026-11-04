@@ -10,7 +10,7 @@
 
 use crate::mesher::Vertex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use wgpu::util::DeviceExt;
 
 /// What the game wants drawn: quads per 16x16x16 section, each section replaced on its own.
@@ -18,8 +18,12 @@ use wgpu::util::DeviceExt;
 pub struct Scene {
     /// World block position the vertex positions are relative to (shared by every section).
     pub anchor: [i32; 3],
-    /// Per section: its revision and quads (4 vertices each).
-    pub sections: HashMap<[i32; 3], (u64, Arc<Vec<Vertex>>)>,
+    /// Per section: its revision and quads (4 vertices each). Once uploaded the quads are let go
+    /// (the GPU keeps them), so they take memory once, not twice.
+    pub sections: HashMap<[i32; 3], (u64, Vec<Vertex>)>,
+    /// Set when the GPU side was made anew (another colour format) after quads were let go: the
+    /// game builds every section again (`take_lost`).
+    pub lost: bool,
     /// Bumped on every change.
     pub revision: u64,
     /// Draw through terrain (no test against the world's depth).
@@ -53,7 +57,7 @@ pub fn put_section(key: [i32; 3], quads: Vec<Vertex>) {
             s.sections.remove(&key);
         } else {
             let rev = s.revision;
-            s.sections.insert(key, (rev, Arc::new(quads)));
+            s.sections.insert(key, (rev, quads));
         }
     });
 }
@@ -64,6 +68,11 @@ pub fn remove_section(key: [i32; 3]) {
             s.revision += 1;
         }
     });
+}
+
+/// Whether the sections have to be handed over again (the GPU side was made anew).
+pub fn take_lost() -> bool {
+    scene(|s| std::mem::take(&mut s.lost))
 }
 
 /// Changes only the draw options, keeping the uploaded geometry.
@@ -297,13 +306,11 @@ impl Gpu {
 
     /// Brings the GPU's sections in line with the scene: gone ones dropped, changed ones
     /// uploaded again, the rest kept.
-    fn sync(&mut self, device: &wgpu::Device, scene: &Scene) {
+    fn sync(&mut self, device: &wgpu::Device, scene: &mut Scene) {
         self.revision = scene.revision;
         self.sections.retain(|k, (rev, ..)| scene.sections.get(k).is_some_and(|(r, _)| r == rev));
-        let mut most = 0;
-        for (key, (rev, quads)) in &scene.sections {
+        for (key, (rev, quads)) in &mut scene.sections {
             let n = (quads.len() / 4) as u32;
-            most = most.max(n);
             if self.sections.contains_key(key) || n == 0 {
                 continue;
             }
@@ -313,7 +320,9 @@ impl Gpu {
                 usage: wgpu::BufferUsages::VERTEX,
             });
             self.sections.insert(*key, (*rev, buffer, n));
+            *quads = Vec::new();
         }
+        let most = self.sections.values().map(|(_, _, n)| *n).max().unwrap_or(0);
         if most > 0 && self.indices.as_ref().is_none_or(|(_, n)| *n < most) {
             let n = most.next_power_of_two();
             let data: Vec<u32> = (0..n).flat_map(|q| [0, 1, 2, 0, 2, 3].map(|i| q * 4 + i)).collect();
@@ -329,13 +338,17 @@ impl Gpu {
 
 /// Draws the scene over the world (the `world_drawn` hook).
 pub fn draw(world: &mut super::WorldDrawn<'_>) {
-    let scene = SCENE.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(scene) = scene.as_ref() else { return };
+    let mut scene = SCENE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(scene) = scene.as_mut() else { return };
     if !scene.visible || scene.sections.is_empty() {
         return;
     }
     let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     if gpu.as_ref().is_none_or(|g| g.format != world.color_format) {
+        // Made anew: what was uploaded before is gone with the old one.
+        if gpu.is_some() {
+            scene.lost = true;
+        }
         *gpu = Some(Gpu::new(world.device, world.queue, world.color_format));
     }
     let gpu = gpu.as_mut().unwrap();
@@ -395,8 +408,37 @@ pub fn draw(world: &mut super::WorldDrawn<'_>) {
     pass.set_pipeline(&gpu.pipeline);
     pass.set_bind_group(0, &group, &[]);
     pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-    for (_, buffer, quads) in gpu.sections.values() {
+    for (key, (_, buffer, quads)) in &gpu.sections {
+        if !in_view(&clip, *key, scene.anchor) {
+            continue;
+        }
         pass.set_vertex_buffer(0, buffer.slice(..));
         pass.draw_indexed(0..quads * 6, 0, 0..1);
     }
+}
+
+/// Whether section `key` (world section coordinates) may be on screen: false only when all its
+/// corners lie beyond one side of the view (or all behind the camera). The frames of the area
+/// and the save (keys far out of the world) are always drawn.
+fn in_view(clip: &glam::Mat4, key: [i32; 3], anchor: [i32; 3]) -> bool {
+    if key.iter().any(|&v| v <= i32::MIN + 16) {
+        return true;
+    }
+    let lo = [0, 1, 2].map(|i| (i64::from(key[i]) * 16 - i64::from(anchor[i])) as f32);
+    // Each side counts the corners beyond it: left, right, below, above, behind.
+    let mut out = [0u8; 5];
+    for c in 0..8 {
+        let p = glam::Vec3::new(
+            lo[0] + if c & 1 == 0 { 0.0 } else { 16.0 },
+            lo[1] + if c & 2 == 0 { 0.0 } else { 16.0 },
+            lo[2] + if c & 4 == 0 { 0.0 } else { 16.0 },
+        );
+        let q = *clip * p.extend(1.0);
+        out[0] += u8::from(q.x < -q.w);
+        out[1] += u8::from(q.x > q.w);
+        out[2] += u8::from(q.y < -q.w);
+        out[3] += u8::from(q.y > q.w);
+        out[4] += u8::from(q.w <= 0.0);
+    }
+    out.iter().all(|&n| n < 8)
 }

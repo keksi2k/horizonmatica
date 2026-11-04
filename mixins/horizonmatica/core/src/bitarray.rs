@@ -37,6 +37,18 @@ impl BitArray {
         })
     }
 
+    /// Like `from_longs`, but keeps the file's array (no copy).
+    pub fn from_vec(longs: Vec<i64>, bits: u32, len: u64) -> Result<Self, String> {
+        let bits = bits.clamp(1, 32);
+        let need = (len * u64::from(bits)).div_ceil(64) as usize;
+        if longs.len() < need {
+            return Err(format!("BlockStates holds {} longs, {need} needed", longs.len()));
+        }
+        // Same size and alignment: the collect reuses the allocation.
+        let longs: Vec<u64> = longs.into_iter().map(|v| v as u64).collect();
+        Ok(Self { longs, bits, mask: (1u64 << bits) - 1, len })
+    }
+
     pub fn len(&self) -> u64 {
         self.len
     }
@@ -64,6 +76,22 @@ impl BitArray {
             (((self.longs[start_long] >> offset) | (self.longs[end_long] << end_offset)) & self.mask)
                 as u32
         }
+    }
+
+    /// Repacks every entry into `bits` bits each (more than now; fewer or the same does nothing).
+    pub fn widen(&mut self, bits: u32) {
+        let bits = bits.clamp(1, 32);
+        if bits <= self.bits {
+            return;
+        }
+        let mut wide = Self::new(bits, self.len);
+        for i in 0..self.len {
+            let v = self.get(i);
+            if v != 0 {
+                wide.set(i, v);
+            }
+        }
+        *self = wide;
     }
 
     pub fn set(&mut self, index: u64, value: u32) {
@@ -111,6 +139,24 @@ mod tests {
         let longs: Vec<i64> = a.longs().iter().map(|&v| v as i64).collect();
         let b = BitArray::from_longs(&longs, 5, 100).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn widening_keeps_every_entry() {
+        let mut a = BitArray::new(2, 1000);
+        for i in 0..1000 {
+            a.set(i, (i % 4) as u32);
+        }
+        a.widen(7);
+        assert_eq!(a.bits(), 7);
+        for i in 0..1000 {
+            assert_eq!(a.get(i), (i % 4) as u32, "entry {i}");
+        }
+        a.set(999, 100);
+        assert_eq!(a.get(999), 100);
+        assert_eq!(a.get(998), 2);
+        a.widen(3); // narrower: nothing changes
+        assert_eq!(a.bits(), 7);
     }
 
     #[test]
