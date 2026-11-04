@@ -90,6 +90,8 @@ minisign -Vm horizonmatica-0.1.1.hnmod -P RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+
 
 ## Usage
 
+The [wiki](docs/wiki/Home.md) explains every button of the menu, tab by tab, with the matching command.
+
 Schematics go into the `schematics/` folder next to `options.txt` of your Horizon instance
 (`/horizonmatica folder` shows the path). `.litematic`, `.schem`, `.schematic` and `.nbt` files are read; the mod
 tells the format by the contents. When two files share a name, loading without an extension picks the `.litematic`.
@@ -294,6 +296,7 @@ libs/horizon-menus/            the menu library (git submodule: github.com/keksi
 tools/make_icon.py             renders icon.png
 tools/package.py               packs the .hnmod (and checks the horizon-menus copy is current);
                                --sign also signs it with minisign (asks for the key's password)
+docs/wiki/                     the wiki: every tab, button and command
 minisign.pub                   the public key release files are signed with
 horizon-registry.toml          the project's page in the Horizon mod registry (read from the newest release's tag)
 ```
