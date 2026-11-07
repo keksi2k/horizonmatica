@@ -425,6 +425,7 @@ fn menu() -> &'static menus::Menu {
             .page("load", "Load schematic", |p| {
                 p.action("reload", "Reload the last schematic");
                 p.action("folder", "Open the schematics folder");
+                p.action("upload_tab", "Upload a file (paste its path, tab Upload)");
                 p.list("files", 10);
             })
             .page("placement", "Placement", |p| {
@@ -840,6 +841,10 @@ fn menu_action(game: &mut Game<'_>, action: &str) {
                 }
                 Err(e) => say(game, &format!("Error: {e}")),
             }
+            return;
+        }
+        "upload_tab" => {
+            with(|s| s.ui_tab = 7);
             return;
         }
         "move_mode" => {
@@ -1543,7 +1548,7 @@ fn say(game: &mut Game<'_>, text: &str) {
 }
 
 const HELP: &[&str] = &[
-    "/horizonmatica list | load <name> | unload [all] | reload | folder | info",
+    "/horizonmatica list | load <name> | unload [all] | reload | folder | info | upload <path>",
     "/horizonmatica placements | select <n>|next|prev | show [on|off] | hide | lock [on|off] | unlock",
     "/horizonmatica origin here | origin <x> <y> <z> | move <dx> <dy> <dz> | rotate cw|ccw|180|none | mirror none|x|z",
     "/horizonmatica pos1|pos2 [here | <x> <y> <z>] (default: the block you look at) | area [clear] | save <name> [overwrite] | save cancel|status",
@@ -1681,6 +1686,32 @@ fn run(game: &mut Game<'_>, args: &[&str]) -> Result<Vec<String>, String> {
                 return Err("usage: /horizonmatica load <name>".into());
             }
             load(game, &rest.join(" "), None)
+        }
+        "upload" => {
+            if rest.is_empty() {
+                return Err("usage: /horizonmatica upload <path to .litematic/.schem/.schematic/.nbt>".into());
+            }
+            let raw = rest.join(" ");
+            let src = std::path::PathBuf::from(raw.trim().trim_matches('"').trim_matches('\''));
+            let dir = schematics_dir()?;
+            let name = src.file_name().ok_or("upload: no file name in that path")?.to_string_lossy().to_string();
+            let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            if !["litematic", "schem", "schematic", "nbt"].contains(&ext.as_str()) {
+                return Err(format!("upload: {name} is not a .litematic/.schem/.schematic/.nbt file"));
+            }
+            let canon = src.canonicalize().map_err(|e| format!("upload: cannot read {}: {e}", src.display()))?;
+            if !canon.is_file() {
+                return Err(format!("upload: {} is not a file", src.display()));
+            }
+            let dest = dir.join(&name);
+            let already = std::fs::canonicalize(&dest).is_ok_and(|d| d == canon);
+            if !already {
+                std::fs::copy(&src, &dest).map_err(|e| format!("upload: copy to {} failed: {e}", dest.display()))?;
+            }
+            let stem = name.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or(name.clone());
+            let mut out = vec![format!("Uploaded {name} to {}", dir.display())];
+            out.extend(load(game, &stem, None)?);
+            Ok(out)
         }
         "reload" => {
             let last = game.native_setting(ID, "last").ok_or("nothing loaded before")?;
@@ -4588,10 +4619,10 @@ pub(super) fn screen(game: &mut Game<'_>, ui: &mut menus::Ui<'_>) {
         let shown = ui.fit(game, name, w / 2.0 - 50.0);
         ui.text_right(game, x0 + w, 7.0, &shown, 0x55FFFF);
     }
-    const TABS: [&str; 8] = ["Load", "Placement", "Save", "Tool", "Printer", "Display", "Materials", "Credits"];
+    const TABS: [&str; 9] = ["Load", "Placement", "Save", "Tool", "Printer", "Display", "Materials", "Upload", "Credits"];
     let tab = with(|s| s.ui_tab).min(TABS.len() - 1);
     let mut next = ui.tabs(game, [x0, 20.0, w, 20.0], &TABS, tab);
-    // 1-8 switch tabs, M closes (while no edit box has the keys).
+    // 1-9 switch tabs, M closes (while no edit box has the keys).
     let digits = [
         KeyCode::Digit1,
         KeyCode::Digit2,
@@ -4601,6 +4632,7 @@ pub(super) fn screen(game: &mut Game<'_>, ui: &mut menus::Ui<'_>) {
         KeyCode::Digit6,
         KeyCode::Digit7,
         KeyCode::Digit8,
+        KeyCode::Digit9,
     ];
     for (i, key) in digits
         .into_iter()
@@ -4625,6 +4657,7 @@ pub(super) fn screen(game: &mut Game<'_>, ui: &mut menus::Ui<'_>) {
         4 => tab_printer(game, ui, body),
         5 => tab_display(game, ui, body),
         6 => tab_materials(game, ui, body),
+        7 => tab_upload(game, ui, body),
         _ => tab_credits(game, ui, body),
     }
     let fy = ui.height - 25.0;
@@ -4635,6 +4668,30 @@ pub(super) fn screen(game: &mut Game<'_>, ui: &mut menus::Ui<'_>) {
     if ui.button(game, [x0 + w - 100.0, fy, 100.0, 20.0], "Done", true) {
         ui.close();
     }
+}
+
+fn tab_upload(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
+    // Upload a schematic file from anywhere on this computer, directly in-game:
+    // paste its full path below, press Upload, and it is copied into the
+    // schematics folder and loaded as a new placement. The same works from
+    // chat with /hm upload <path>. No OS file dialog crate is needed: the
+    // path is typed/pasted into this edit box (menus_screen_type handles typing).
+    ui.text_wrapped(game, r[0], r[1] + 4.0, r[2], "Upload a schematic directly: paste the full path to a .litematic, .schem, .schematic or .nbt file on this computer, then press Upload. It is copied into the schematics folder and loaded here.", 0xA0A0A0);
+    let path = ui.edit(game, "upload_path", [r[0], r[1] + 44.0, r[2] - 104.0, 18.0], "C:\\Users\\you\\Downloads\\my_build.litematic", 260);
+    if ui.button(game, [r[0] + r[2] - 100.0, r[1] + 44.0, 100.0, 18.0], "Upload", true) {
+        let p = path.trim().to_string();
+        if p.is_empty() {
+            with(|s| s.ui_message = "Paste a file path first.".into());
+        } else {
+            act(game, &["upload", p.as_str()]);
+        }
+    }
+    ui.text_wrapped(game, r[0], r[1] + 72.0, r[2], "Tip: /hm upload <path> in chat does the same. After upload, use Placement to move it, Printer to auto-build it, and the ghost overlay to check it.", 0xA0A0A0);
+    if ui.button(game, [r[0], r[1] + 104.0, 150.0, 20.0], "Open folder", true) {
+        menu_action(game, "folder");
+    }
+    let dir = schematics_dir().map(|d| d.display().to_string()).unwrap_or_default();
+    ui.text_wrapped(game, r[0], r[1] + 130.0, r[2], &format!("Schematics folder: {dir}"), 0x808080);
 }
 
 fn tab_load(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
