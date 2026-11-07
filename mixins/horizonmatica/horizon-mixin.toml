@@ -9,7 +9,7 @@ version = "0.2.0"
 # prediction, the entity geometry), so it is pinned to the Horizon commit it was checked against:
 # Nightly 2026-11-04 (67dad0d). For another Nightly, set its commit here (see README.md).
 [compatibility]
-horizon_revision = "6560641ba51a452f6bc2407baa4eb1b3be517ca8"
+horizon_revision = "2ebf00a0281c592f79191e76fce0e7d522c6f425"
 
 # ---------------------------------------------------------------- modules
 

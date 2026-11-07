@@ -24,9 +24,8 @@ def main():
     data = subprocess.check_output([LAUNCHER, "versions", "--json"], text=True)
     newest = json.loads(data)[0]; tag = newest["tag"]
     print("newest:", tag, "installed:", newest["installed"])
-    req = urllib.request.Request(f"https://api.github.com/repos/horizon-rust/horizon/git/refs/tags/nightly-source/{tag}", headers={"User-Agent": "horizonmatica-update", "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req) as r:
-        full = json.load(r)["object"]["sha"]
+    src_tag = tag.removeprefix("nightly-")
+    full = json.loads(subprocess.check_output([r"C:\Program Files\GitHub CLI\gh.exe", "api", f"repos/horizon-rust/horizon/git/refs/tags/nightly-source/{src_tag}"], text=True))["object"]["sha"]
     print("full commit:", full)
     if not newest["installed"]:
         run([LAUNCHER, "install", tag])
