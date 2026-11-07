@@ -24,7 +24,8 @@ def main():
     data = subprocess.check_output([LAUNCHER, "versions", "--json"], text=True)
     newest = json.loads(data)[0]; tag = newest["tag"]
     print("newest:", tag, "installed:", newest["installed"])
-    with urllib.request.urlopen(f"https://api.github.com/repos/horizon-rust/horizon/git/refs/tags/nightly-source/{tag}") as r:
+    req = urllib.request.Request(f"https://api.github.com/repos/horizon-rust/horizon/git/refs/tags/nightly-source/{tag}", headers={"User-Agent": "horizonmatica-update"})
+    with urllib.request.urlopen(req) as r:
         full = json.load(r)["object"]["sha"]
     print("full commit:", full)
     if not newest["installed"]:
