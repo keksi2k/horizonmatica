@@ -56,6 +56,7 @@ pub fn load(bytes: &[u8]) -> Result<(Schematic, Format), String> {
         Format::Structure => structure(&root)?,
         Format::McEdit => mcedit(&root)?,
     };
+    schematic.check_extent()?;
     Ok((schematic, format))
 }
 
@@ -161,11 +162,10 @@ fn check_volume(size: [i32; 3]) -> Result<u64, String> {
     if size.iter().any(|&v| v <= 0) {
         return Err(format!("empty size {size:?}"));
     }
-    let volume: u64 = size.iter().map(|&v| v as u64).product();
-    if volume > MAX_VOLUME {
-        return Err(format!("too large ({volume} blocks)"));
+    match crate::area::volume(size) {
+        Some(volume) if volume <= MAX_VOLUME => Ok(volume),
+        _ => Err(format!("too large ({size:?})")),
     }
-    Ok(volume)
 }
 
 fn ints(t: Option<&Tag>) -> Option<Vec<i64>> {

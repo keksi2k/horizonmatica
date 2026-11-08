@@ -307,6 +307,9 @@ pub const MAX_UNPACKED: usize = 8 << 30;
 /// Upper bound on a region's volume, the same for saving and loading: 2^31 cells, so an index
 /// fits the long array's i32 length at any width (memory is the real limit: a few bits a cell).
 pub const MAX_VOLUME: u64 = 1 << 31;
+/// Upper bound on a region's corners relative to the schematic's origin, either way: any box
+/// inside measures less than 2^31 a side, and turning or mirroring it can't overflow.
+pub const MAX_REL: i32 = (1 << 30) - 1;
 
 pub(crate) fn vec3(tag: Option<&Tag>) -> Option<[i32; 3]> {
     let t = tag?;
@@ -358,15 +361,24 @@ impl Schematic {
         for (name, mut r) in regions_tag {
             let position = vec3(r.get("Position")).ok_or_else(|| format!("region {name}: no Position"))?;
             let raw_size = vec3(r.get("Size")).ok_or_else(|| format!("region {name}: no Size"))?;
-            let size = raw_size.map(i32::abs);
+            // Wide, so no Position or Size in a file can overflow.
+            let size = raw_size.map(|v| i64::from(v).abs());
             let end = [0, 1, 2].map(|i| {
-                position[i] + if raw_size[i] >= 0 { raw_size[i] - 1 } else { raw_size[i] + 1 }
+                let (p, s) = (i64::from(position[i]), i64::from(raw_size[i]));
+                p + if s >= 0 { s - 1 } else { s + 1 }
             });
-            let min = [0, 1, 2].map(|i| position[i].min(end[i]));
-            let volume: u64 = size.iter().map(|&v| v as u64).product();
-            if volume > MAX_VOLUME {
-                return Err(format!("region {name} is too large ({volume} blocks)"));
+            let min = [0, 1, 2].map(|i| i64::from(position[i]).min(end[i]));
+            let max = [0, 1, 2].map(|i| i64::from(position[i]).max(end[i]));
+            if (0..3).any(|i| min[i] < -i64::from(MAX_REL) || max[i] > i64::from(MAX_REL)) {
+                return Err(format!("region {name} lies too far out (Position {position:?}, Size {raw_size:?})"));
             }
+            // Inside ±MAX_REL, both fit an i32 now.
+            let size = size.map(|v| v as i32);
+            let min = min.map(|v| v as i32);
+            let volume = match crate::area::volume(size) {
+                Some(volume) if volume <= MAX_VOLUME => volume,
+                _ => return Err(format!("region {name} is too large ({size:?})")),
+            };
             let palette: Vec<BlockState> = r
                 .get("BlockStatePalette")
                 .and_then(Tag::list)
@@ -475,6 +487,19 @@ impl Schematic {
     }
 
     /// The bounding box of all regions, relative to the origin: (min, max inclusive).
+    /// `Err` when a region reaches past [`MAX_REL`] from the origin (every reader checks this).
+    pub fn check_extent(&self) -> Result<(), String> {
+        for r in &self.regions {
+            for i in 0..3 {
+                let hi = i64::from(r.min[i]) + i64::from(r.size[i]) - 1;
+                if i64::from(r.min[i]) < -i64::from(MAX_REL) || hi > i64::from(MAX_REL) || r.size[i] <= 0 {
+                    return Err(format!("region {} is too large or lies too far out", r.name));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn bounds(&self) -> ([i32; 3], [i32; 3]) {
         let mut lo = [i32::MAX; 3];
         let mut hi = [i32::MIN; 3];
@@ -526,6 +551,32 @@ mod tests {
         assert_eq!(r.min, [0, 0, 0]);
         assert_eq!(r.size, [3, 2, 4]);
         assert_eq!(s.bounds(), ([0, 0, 0], [2, 1, 3]));
+    }
+
+    /// `sample()` written out, with its region's Position and Size replaced, read back.
+    fn read_with(position: [i32; 3], size: [i32; 3]) -> Result<Schematic, String> {
+        let mut root = crate::nbt::read_file_bytes(&sample().to_bytes(), MAX_UNPACKED).unwrap();
+        let xyz = |v: [i32; 3]| Tag::Compound([("x", v[0]), ("y", v[1]), ("z", v[2])].into_iter().map(|(k, v)| (k.to_string(), Tag::Int(v))).collect());
+        let Tag::Compound(top) = &mut root else { panic!() };
+        let Some(Tag::Compound(regions)) = top.get_mut("Regions") else { panic!() };
+        let Some(Tag::Compound(region)) = regions.get_mut("main") else { panic!() };
+        region.insert("Position".into(), xyz(position));
+        region.insert("Size".into(), xyz(size));
+        Schematic::from_nbt(root)
+    }
+
+    #[test]
+    fn region_corners_from_a_file_are_checked() {
+        // Overflowed when the far corner was computed in i32.
+        assert!(read_with([i32::MAX, 0, 0], [3, 2, 4]).unwrap_err().contains("too far out"));
+        assert!(read_with([i32::MIN, 0, 0], [-3, 2, -4]).unwrap_err().contains("too far out"));
+        assert!(read_with([0, 0, 0], [i32::MIN, 2, 4]).is_err());
+        assert!(read_with([MAX_REL + 1, 0, 0], [3, 2, 4]).is_err());
+        // Sizes whose product overflows u64 (2^31 - 1 cubed) are too large, not wrapped.
+        assert!(read_with([0, 0, 0], [MAX_REL, MAX_REL, MAX_REL]).unwrap_err().contains("too large"));
+        // On the edge it still reads (the block array doesn't matter for this check).
+        let s = read_with([MAX_REL - 2, 0, 0], [3, 2, 4]).unwrap();
+        assert_eq!(s.bounds(), ([MAX_REL - 2, 0, 0], [MAX_REL, 1, 3]));
     }
 
     #[test]

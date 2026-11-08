@@ -3,7 +3,7 @@
 
 [mod]
 id = "horizonmatica"
-version = "0.3.0"
+version = "0.3.1"
 
 # The mod uses game internals beyond the stable hook points (block models, the view, placement
 # prediction, the entity geometry), so it is pinned to the Horizon commit it was checked against:

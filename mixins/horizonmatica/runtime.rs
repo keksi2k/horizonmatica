@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(crate) const ID: &str = "horizonmatica";
-pub(crate) const VERSION: &str = "0.3.0";
+pub(crate) const VERSION: &str = "0.3.1";
 pub(crate) const DESCRIPTION: &str = "Schematic overlay, verifier, material list and printer (auto-build) for .litematic, .schem, .schematic and .nbt files. Based on Litematica by masa (maruohon) and Sakura-Ryoko, and the Litematica Printer by aleksilassila. Not made or endorsed by them.";
 
 /// Who Horizonmatica owes its design to (`/horizonmatica credits`, the settings page).
@@ -424,6 +424,11 @@ impl State {
     fn area_box(&self) -> Option<([i32; 3], [i32; 3])> {
         let [Some(a), Some(b)] = self.area else { return None };
         Some(([0, 1, 2].map(|i| a[i].min(b[i])), [0, 1, 2].map(|i| a[i].max(b[i]))))
+    }
+    /// The area selection's size in blocks, checked (`None` without both corners).
+    fn area_size(&self) -> Option<[i32; 3]> {
+        let [Some(a), Some(b)] = self.area else { return None };
+        horizonmatica_core::area::size(a, b)
     }
     /// Drops every placement (another world, `/hm unload all`).
     fn drop_all(&mut self) {
@@ -1325,7 +1330,7 @@ fn finish_load(game: &mut Game<'_>, job: LoadJob, read: Vec<Result<ReadFile, Str
     match job.then {
         Then::Load => {
             let (read, at) = first_read(&job.files, read)?;
-            let (slot, mut msg) = place(game, read, at);
+            let (slot, mut msg) = place(game, read, at)?;
             let count = with(|s| {
                 s.slots.push(slot);
                 s.selected = s.slots.len() - 1;
@@ -1348,7 +1353,7 @@ fn finish_load(game: &mut Game<'_>, job: LoadJob, read: Vec<Result<ReadFile, Str
         Then::Reload => {
             let (read, at) = first_read(&job.files, read)?;
             // Still loaded there: read again from its file (after it was changed), else added.
-            let (slot, msg) = place(game, read, at);
+            let (slot, msg) = place(game, read, at)?;
             let replaced = with(|s| {
                 let same = s.slots.iter().position(|x| x.placement.file_name == slot.placement.file_name && x.placement.origin == at.0);
                 match same {
@@ -1372,13 +1377,15 @@ fn finish_load(game: &mut Game<'_>, job: LoadJob, read: Vec<Result<ReadFile, Str
             let mut restored = Vec::new();
             for (((file, at), read), (shown, locked)) in job.files.iter().zip(read).zip(flags) {
                 match read {
-                    Ok(read) => {
-                        let (mut slot, _) = place(game, read, *at);
-                        slot.shown = shown;
-                        slot.locked = locked;
-                        restored.push(format!("{file} at {} {} {}", at.0[0], at.0[1], at.0[2]));
-                        with(|s| s.slots.push(slot));
-                    }
+                    Ok(read) => match place(game, read, *at) {
+                        Ok((mut slot, _)) => {
+                            slot.shown = shown;
+                            slot.locked = locked;
+                            restored.push(format!("{file} at {} {} {}", at.0[0], at.0[1], at.0[2]));
+                            with(|s| s.slots.push(slot));
+                        }
+                        Err(e) => lines.push(format!("Couldn't restore {file}: {e}")),
+                    },
                     Err(e) => lines.push(format!("Couldn't restore {file}: {e}")),
                 }
             }
@@ -1399,12 +1406,11 @@ fn first_read(files: &[(String, At)], read: Vec<Result<ReadFile, String>>) -> Re
 }
 
 /// Places a file that was read: a new slot, not yet added, and the line telling what was loaded.
-fn place(game: &mut Game<'_>, read: ReadFile, at: At) -> (Slot, String) {
+/// `Err` when it would reach outside the world there.
+fn place(game: &mut Game<'_>, read: ReadFile, at: At) -> Result<(Slot, String), String> {
     let ReadFile { file, schematic, format, from_version, upgraded, histograms } = read;
     let (origin, rotation, mirror) = at;
-    let mut placement = Placement::new(file, schematic, origin);
-    placement.set_rotation(rotation);
-    placement.set_mirror(mirror);
+    let placement = Placement::placed(file, schematic, origin, rotation, mirror)?;
     let (lo, hi) = placement.bounds();
     let size = [0, 1, 2].map(|i| hi[i] - lo[i] + 1);
     let (slot, unknown) = with(|s| {
@@ -1439,7 +1445,7 @@ fn place(game: &mut Game<'_>, read: ReadFile, at: At) -> (Slot, String) {
     if !unknown.is_empty() {
         msg += &format!(". Unknown blocks (skipped): {}", unknown.join(", "));
     }
-    (slot, msg)
+    Ok((slot, msg))
 }
 
 /// Loads a schematic as another placement (at the player's feet without `at`) and selects it.
@@ -1855,10 +1861,11 @@ fn run(game: &mut Game<'_>, args: &[&str]) -> Result<Vec<String>, String> {
                 Some("here") => feet(game).ok_or("not in a world")?,
                 _ => [int(rest.first(), "x")?, int(rest.get(1), "y")?, int(rest.get(2), "z")?],
             };
+            let at = horizonmatica_core::area::check_corner(at)?;
             let i = usize::from(sub.ends_with('2'));
             let size = with(|s| {
                 s.area[i] = Some(at);
-                s.area_box().map(|(lo, hi)| [0, 1, 2].map(|k| hi[k] - lo[k] + 1))
+                s.area_size()
             });
             let mut line = format!("Corner {} at {} {} {}", i + 1, at[0], at[1], at[2]);
             if let Some(d) = size {
@@ -1871,11 +1878,11 @@ fn run(game: &mut Game<'_>, args: &[&str]) -> Result<Vec<String>, String> {
                 with(|s| s.area = [None; 2]);
                 return Ok(vec!["Area selection cleared.".into()]);
             }
-            let (area, size) = with(|s| (s.area, s.area_box().map(|(lo, hi)| [0, 1, 2].map(|k| hi[k] - lo[k] + 1))));
+            let (area, size) = with(|s| (s.area, s.area_size()));
             let corner = |c: Option<[i32; 3]>| c.map_or("not set".to_string(), |c| format!("{} {} {}", c[0], c[1], c[2]));
             let mut line = format!("Area: corner 1 {}, corner 2 {}", corner(area[0]), corner(area[1]));
             if let Some(d) = size {
-                line += &format!(" · {} x {} x {} = {} blocks", d[0], d[1], d[2], d.iter().map(|&v| i64::from(v)).product::<i64>());
+                line += &format!(" · {} x {} x {} = {} blocks", d[0], d[1], d[2], volume_text(d));
             }
             Ok(vec![line])
         }
@@ -1971,10 +1978,7 @@ fn run(game: &mut Game<'_>, args: &[&str]) -> Result<Vec<String>, String> {
                 Some("here") | None => feet(game).ok_or("not in a world")?,
                 _ => [int(rest.first(), "x")?, int(rest.get(1), "y")?, int(rest.get(2), "z")?],
             };
-            with(|s| {
-                selected_mut(s)?.set_origin(at);
-                Ok::<_, String>(())
-            })?;
+            with(|s| selected_mut(s)?.set_origin(at))?;
             changed(game);
             Ok(vec![format!("Origin set to {} {} {}", at[0], at[1], at[2])])
         }
@@ -1982,7 +1986,7 @@ fn run(game: &mut Game<'_>, args: &[&str]) -> Result<Vec<String>, String> {
             let d = [int(rest.first(), "dx")?, int(rest.get(1), "dy")?, int(rest.get(2), "dz")?];
             let o = with(|s| {
                 let p = selected_mut(s)?;
-                p.nudge(d);
+                p.nudge(d)?;
                 Ok::<_, String>(p.origin)
             })?;
             changed(game);
@@ -1996,7 +2000,7 @@ fn run(game: &mut Game<'_>, args: &[&str]) -> Result<Vec<String>, String> {
                     Some("ccw") => p.rotation.then(Rotation::CounterClockwise90),
                     Some(v) => Rotation::parse(v).ok_or("rotate cw, ccw, 180 or none")?,
                 };
-                p.set_rotation(r);
+                p.set_rotation(r)?;
                 Ok::<_, String>(r)
             })?;
             changed(game);
@@ -2004,10 +2008,7 @@ fn run(game: &mut Game<'_>, args: &[&str]) -> Result<Vec<String>, String> {
         }
         "mirror" => {
             let m = Mirror::parse(rest.first().copied().unwrap_or("none")).ok_or("mirror none, x or z")?;
-            with(|s| {
-                selected_mut(s)?.set_mirror(m);
-                Ok::<_, String>(())
-            })?;
+            with(|s| selected_mut(s)?.set_mirror(m))?;
             changed(game);
             Ok(vec![format!("Mirror: {}", m.name())])
         }
@@ -2411,8 +2412,8 @@ fn shift(d: [i32; 3]) -> bool {
         if s.sel().is_some_and(|x| x.locked) {
             return false;
         }
-        if let Some(p) = s.placement_mut() {
-            p.nudge(d);
+        // At the edge of the world it stays put.
+        if s.placement_mut().is_some_and(|p| p.nudge(d).is_ok()) {
             s.scan = Scan::default();
             s.mesh_key = None;
         }
@@ -2480,8 +2481,8 @@ pub(super) fn wheel(game: &mut Game<'_>, steps: f32, claimed: &mut bool) {
         return;
     }
     let axis = dominant(super::view_vector(game.yaw, game.pitch));
-    let k = n * move_step(game);
-    if !shift(axis.map(|v| v * k)) {
+    let k = n.saturating_mul(move_step(game));
+    if !shift(axis.map(|v| v.saturating_mul(k))) {
         say(game, "The placement is locked (/hm unlock)");
     }
 }
@@ -4122,7 +4123,7 @@ pub(super) fn mouse(game: &mut Game<'_>, button: winit::event::MouseButton, pres
     if b < 2 {
         if let Some(at) = tool_target(game) {
             with(|s| {
-                s.area[b] = Some(at);
+                s.area[b] = Some(horizonmatica_core::area::clamp_corner(at));
                 s.grab = Grab::Corner(b);
             });
         }
@@ -4301,8 +4302,8 @@ fn placement_wheel(game: &mut Game<'_>, steps: f32, claimed: &mut bool) {
         return;
     }
     let axis = dominant(super::view_vector(game.yaw, game.pitch));
-    let k = n * move_step(game);
-    if shift(axis.map(|v| v * k)) {
+    let k = n.saturating_mul(move_step(game));
+    if shift(axis.map(|v| v.saturating_mul(k))) {
         save_placements(game);
     } else {
         say(game, "The placement is locked (/hm unlock)");
@@ -4335,12 +4336,13 @@ fn tool_wheel(game: &mut Game<'_>, steps: f32, claimed: &mut bool) {
         return;
     }
     let axis = dominant(super::view_vector(game.yaw, game.pitch));
-    let k = n * move_step(game);
+    let k = n.saturating_mul(move_step(game));
     with(|s| {
         if ctrl {
             grow(s, axis, k);
         } else {
-            let moved = |c: Option<[i32; 3]>| c.map(|c| [0, 1, 2].map(|i| c[i] + axis[i] * k));
+            let d = axis.map(|a| a.saturating_mul(k));
+            let moved = |c: Option<[i32; 3]>| c.map(|c| horizonmatica_core::area::offset_corner(c, d));
             match s.grab {
                 Grab::Corner(i) => s.area[i] = moved(s.area[i]),
                 Grab::Box => s.area = s.area.map(moved),
@@ -4357,10 +4359,12 @@ fn grow(s: &mut State, axis: [i32; 3], k: i32) {
     let sign = axis[i];
     // The corner on that face (the far one along `axis`), and the other one.
     let f = if (a[i] - b[i]) * sign > 0 || (a[i] == b[i] && sign > 0) { 0 } else { 1 };
-    let (mut c, other) = if f == 0 { (a, b[i]) } else { (b, a[i]) };
-    c[i] += sign * k;
+    let (c, other) = if f == 0 { (a, b[i]) } else { (b, a[i]) };
+    let mut d = [0; 3];
+    d[i] = sign.saturating_mul(k);
+    let mut c = horizonmatica_core::area::offset_corner(c, d);
     // Shrunk to one block at most.
-    if (c[i] - other) * sign < 0 {
+    if (i64::from(c[i]) - i64::from(other)) * i64::from(sign) < 0 {
         c[i] = other;
     }
     s.area[f] = Some(c);
@@ -4392,8 +4396,8 @@ fn tool_lines(s: &State) -> Vec<(String, u32)> {
     }
     let c = |i: usize| s.area[i].map_or("not set".to_string(), |c| format!("{} {} {}", c[0], c[1], c[2]));
     let mut corners = format!("Corner 1: {} · corner 2: {}", c(0), c(1));
-    if let Some((lo, hi)) = s.area_box() {
-        corners += &format!(" · {} x {} x {}", hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1);
+    if let Some(d) = s.area_size() {
+        corners += &format!(" · {} x {} x {}", d[0], d[1], d[2]);
     }
     let what = match s.grab {
         Grab::Box => "the box".to_string(),
@@ -4473,10 +4477,10 @@ fn start_save(game: &mut Game<'_>, name: &str, overwrite: bool) -> Result<String
         return Err(format!("{file} is still being saved (/hm save cancel stops it)"));
     }
     let (lo, hi) = with(|s| s.area_box()).ok_or("set both corners first (the selection tool, or /hm pos1 and /hm pos2)")?;
-    let size = [0, 1, 2].map(|i| hi[i] - lo[i] + 1);
-    let volume: u64 = size.iter().map(|&v| v as u64).product();
-    if volume > MAX_SAVE {
-        return Err(format!("the area has {volume} blocks; at most {MAX_SAVE} can be saved at once"));
+    let size = horizonmatica_core::area::size(lo, hi).ok_or("the area is too large to save")?;
+    match horizonmatica_core::area::volume(size) {
+        Some(volume) if volume <= MAX_SAVE => {}
+        _ => return Err(format!("the area has {} blocks; at most {MAX_SAVE} can be saved at once", volume_text(size))),
     }
     let stem = file_stem(name)?;
     let file = format!("{stem}.litematic");
@@ -4601,8 +4605,9 @@ fn save_chunk(game: &Game<'_>, job: &mut SaveJob, (cx, cz): (i32, i32)) {
 /// large one takes a while), first beside its name, so a failed write never leaves half a file.
 fn finish_save(game: &mut Game<'_>, job: SaveJob) {
     let SaveJob { name, file, path, lo, hi, builder, started, .. } = job;
-    let size = [0, 1, 2].map(|i| hi[i] - lo[i] + 1);
-    let volume: i64 = size.iter().map(|&v| i64::from(v)).product();
+    // Checked when the save started (at most MAX_SAVE blocks).
+    let size = horizonmatica_core::area::size(lo, hi).unwrap_or([1; 3]);
+    let volume = horizonmatica_core::area::volume(size).and_then(|v| i64::try_from(v).ok()).unwrap_or(0);
     let (blocks, states) = (builder.non_air(), builder.states());
     let stem = file.trim_end_matches(".litematic").to_string();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
@@ -4759,7 +4764,7 @@ pub(super) fn hud(game: &mut Game<'_>, batch: &mut HudBatch, corners: &mut Corne
     let tool = tool_held(game);
     let lines = with(|s| {
         load_settings(game, s);
-        let area = s.area_box().map(|(lo, hi)| [0, 1, 2].map(|i| hi[i] - lo[i] + 1));
+        let area = s.area_size();
         let Some(slot) = s.sel() else {
             // Only an area selection: its size.
             return Some(match area {
@@ -4912,6 +4917,11 @@ fn file_info_cached(name: &str, key: &str) -> Option<Result<FileInfo, String>> {
         let _ = tx.send((key, info));
     });
     None
+}
+
+/// The block count of an area of `size`, or a note when it doesn't fit a number.
+fn volume_text(size: [i32; 3]) -> String {
+    horizonmatica_core::area::volume(size).map_or("more than 2^64".to_string(), |v| v.to_string())
 }
 
 fn human_size(bytes: u64) -> String {
@@ -5416,9 +5426,9 @@ fn tab_save(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
         }
         y += 24.0;
     }
-    let size = with(|s| s.area_box().map(|(lo, hi)| [0, 1, 2].map(|k| hi[k] - lo[k] + 1)));
+    let size = with(|s| s.area_size());
     let text = match size {
-        Some(d) => format!("{} x {} x {} = {} blocks", d[0], d[1], d[2], d.iter().map(|&v| i64::from(v)).product::<i64>()),
+        Some(d) => format!("{} x {} x {} = {} blocks", d[0], d[1], d[2], volume_text(d)),
         None => "Set both corners.".to_string(),
     };
     ui.text(game, r[0], y + 2.0, &text, if size.is_some() { 0x55FF55 } else { 0xA0A0A0 });

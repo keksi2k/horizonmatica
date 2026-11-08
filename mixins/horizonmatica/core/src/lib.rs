@@ -4,6 +4,7 @@
 //! everything that doesn't need the game lives here, so it is tested with a plain `cargo test`
 //! and compiled once by Cargo.
 
+pub mod area;
 pub mod bitarray;
 pub mod formats;
 mod legacy_blocks;
