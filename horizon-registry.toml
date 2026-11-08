@@ -32,7 +32,7 @@ Usage: put schematics into `schematics/` next to `options.txt` of your instance 
 
 ⚠️ On other people's servers, automatic placing may break the rules or trip anti-cheat. The printer is off until you turn it on (`K` or `/hm printer on`). The *air place* options of the printer and easy place (off by default) are noticed by anti-cheat plugins such as Grim.
 
-**Version:** native mods use game internals, so Horizonmatica is pinned to one Horizon commit (currently Nightly 2026-11-04, `67dad0d`). A new Nightly needs a new release.
+**Version:** native mods use game internals, so Horizonmatica is pinned to one Horizon commit (currently Nightly 2026-11-08, `fdc87ae`). A new Nightly needs a new release.
 
 ## Credits
 The idea, the way it's used, the file format and the behaviour come from **[Litematica](https://github.com/maruohon/litematica)** by masa (maruohon), maintained by **[Sakura-Ryoko](https://github.com/sakura-ryoko/litematica)**, and from **[Litematica Printer](https://github.com/aleksilassila/litematica-printer)** by aleksilassila. Horizonmatica is not an official project of these authors, isn't made or endorsed by them, and contains none of their code. Only the file format and the behaviour are re-created. If you like it, go and support the originals.

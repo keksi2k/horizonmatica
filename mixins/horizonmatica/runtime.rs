@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(crate) const ID: &str = "horizonmatica";
-pub(crate) const VERSION: &str = "0.3.1";
+pub(crate) const VERSION: &str = "0.3.2";
 pub(crate) const DESCRIPTION: &str = "Schematic overlay, verifier, material list and printer (auto-build) for .litematic, .schem, .schematic and .nbt files. Based on Litematica by masa (maruohon) and Sakura-Ryoko, and the Litematica Printer by aleksilassila. Not made or endorsed by them.";
 
 /// Who Horizonmatica owes its design to (`/horizonmatica credits`, the settings page).

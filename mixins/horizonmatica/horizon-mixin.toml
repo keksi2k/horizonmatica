@@ -3,13 +3,13 @@
 
 [mod]
 id = "horizonmatica"
-version = "0.3.1"
+version = "0.3.2"
 
 # The mod uses game internals beyond the stable hook points (block models, the view, placement
 # prediction, the entity geometry), so it is pinned to the Horizon commit it was checked against:
-# Nightly 2026-11-04 (67dad0d). For another Nightly, set its commit here (see README.md).
+# Nightly 2026-11-08 (fdc87ae). For another Nightly, set its commit here (see README.md).
 [compatibility]
-horizon_revision = "67dad0d1a5adca139b426c8114e74a33b376ba64"
+horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
 
 # ---------------------------------------------------------------- modules
 
@@ -102,7 +102,7 @@ bindings = [
 # The selection tool: a mouse button while playing (no hook point for the client's own clicks).
 [[injection]]
 id = "mouse"
-target = "horizon_client::game::Game<'_>::play_mouse"
+target = "horizon_client::game::play_input::Game<'_>::play_mouse"
 kind = "HEAD"
 cancellable = true
 helper = "mouse.rs"
@@ -261,7 +261,7 @@ bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *s
 
 [[injection]]
 id = "menus_screen_pauses"
-target = "horizon_client::game::Game<'_>::pauses_game"
+target = "horizon_client::game::pointer_capture::Game<'_>::pauses_game"
 kind = "HEAD"
 cancellable = true
 helper = "menus_screen_pauses.rs"
