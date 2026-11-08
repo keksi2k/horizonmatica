@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(crate) const ID: &str = "horizonmatica";
-pub(crate) const VERSION: &str = "0.2.0";
+pub(crate) const VERSION: &str = "0.3.0";
 pub(crate) const DESCRIPTION: &str = "Schematic overlay, verifier, material list and printer (auto-build) for .litematic, .schem, .schematic and .nbt files. Based on Litematica by masa (maruohon) and Sakura-Ryoko, and the Litematica Printer by aleksilassila. Not made or endorsed by them.";
 
 /// Who Horizonmatica owes its design to (`/horizonmatica credits`, the settings page).
@@ -43,16 +43,34 @@ const CREDITS: &[&str] = &[
     "No code was copied from Litematica or the printer; it is not made or endorsed by their authors.",
 ];
 
-/// Keys: (name, label, default).
-pub(crate) const KEYS: &[(&str, &str, &str)] = &[
+/// Everything a key can do: (id, label, default key). The id is the menu action's (`menu_action`),
+/// the default "" leaves it unbound. Bound on the Keys page; the ids name the settings `key_<id>`.
+pub(crate) const BINDS: &[(&str, &str, &str)] = &[
     ("open_menu", "Open the Horizonmatica menu", "key.keyboard.m"),
     ("toggle_render", "Toggle schematic rendering", "key.keyboard.v"),
     ("layer_up", "Layer up", "key.keyboard.page.up"),
     ("layer_down", "Layer down", "key.keyboard.page.down"),
     ("layer_mode", "Cycle layer mode", "key.keyboard.home"),
-    ("toggle_printer", "Toggle printer (auto-build)", "key.keyboard.k"),
-    ("toggle_materials", "Toggle material list", "key.keyboard.j"),
-    ("move_mode", "Move mode (wheel/arrows move the schematic)", "key.keyboard.n"),
+    ("toggle_printer", "Printer on/off", "key.keyboard.k"),
+    ("toggle_easy_place", "Easy place on/off", ""),
+    ("toggle_materials", "Material list on/off", "key.keyboard.j"),
+    ("move_mode", "Move mode", "key.keyboard.n"),
+    ("toggle_tool", "Selection tool on/off", ""),
+    ("reload", "Reload the last schematic", ""),
+    ("rotate_cw", "Rotate clockwise", ""),
+    ("rotate_ccw", "Rotate counter-clockwise", ""),
+    ("mirror_next", "Mirror (next axis)", ""),
+    ("here", "Move the placement to me", ""),
+    ("show_toggle", "Show or hide the placement", ""),
+    ("select_next", "Select next placement", ""),
+    ("select_prev", "Select previous placement", ""),
+    ("unload", "Unload this placement", ""),
+    ("unload_all", "Unload all placements", ""),
+    ("area_pos1", "Area corner 1 at my position", ""),
+    ("area_pos2", "Area corner 2 at my position", ""),
+    ("area_clear", "Clear the area", ""),
+    ("materials_copy", "Copy the material list", ""),
+    ("folder", "Open the schematics folder", ""),
 ];
 
 /// How long the printer may look for a block it can place, per tick. What it can't place is
@@ -121,6 +139,13 @@ struct Settings {
     tool_placement: bool,
     /// Frames around the placements (the selected one bright, cyan or, locked, orange).
     placement_boxes: bool,
+    /// Easy place: holding the right button places the block the schematic wants where the
+    /// crosshair points, when it is the item in hand.
+    easy_place: bool,
+    /// Ticks between two easy placements while the button is held.
+    easy_interval: u32,
+    /// Easy place may click a ghost block with no real neighbour (the printer has its own).
+    easy_air: bool,
 }
 
 impl Default for Settings {
@@ -152,6 +177,9 @@ impl Default for Settings {
             tool_hud: true,
             tool_placement: false,
             placement_boxes: true,
+            easy_place: false,
+            easy_interval: 2,
+            easy_air: false,
         }
     }
 }
@@ -321,6 +349,19 @@ struct State {
     /// What the selection tool's wheel moves, and the mouse buttons whose press it took.
     grab: Grab,
     tool_down: [bool; 3],
+    /// Each bind's id and key (empty: unbound), read once; `capture` is the bind waiting for a key.
+    binds: Option<Vec<(String, String)>>,
+    capture: Option<String>,
+    /// Easy place: the right button is down; its press was taken (so its release is too); the
+    /// tick the next placement may come; the item last asked for and until when that waits (a
+    /// server's answer to a swap takes a moment); why it can't place right now.
+    right_down: bool,
+    easy_taken: bool,
+    easy_next: u64,
+    easy_pick: Option<(String, u64)>,
+    easy_note: String,
+    /// The mod's own click is being made: the mouse hook leaves it to the game.
+    own_click: bool,
     /// The credits line was shown this session (on the first load).
     credited: bool,
     printer_note: String,
@@ -418,6 +459,7 @@ fn menu() -> &'static menus::Menu {
                 p.link("placement", "Placement");
                 p.link("selection", "Area selection & saving");
                 p.link("printer", "Printer (auto-build)");
+                p.link("easy_place", "Easy place");
                 p.link("display", "Display");
                 p.link("hud", "HUD & material list");
                 p.link("credits", "Credits");
@@ -451,6 +493,11 @@ fn menu() -> &'static menus::Menu {
                 p.number("printer_interval", "One block every", f64::from(d.printer.interval), (1.0, 20.0, 1.0), 0, " ticks");
                 p.number("printer_reach", "Reach", d.printer.reach, (1.0, 6.0, 0.5), 1, " blocks");
                 p.toggle("air_place", "Air place (no neighbour needed)", d.printer.air_place);
+            })
+            .page("easy_place", "Easy place", |p| {
+                p.toggle("easy_place", "Easy place", d.easy_place);
+                p.number("easy_interval", "Easy place every", f64::from(d.easy_interval), (1.0, 10.0, 1.0), 0, " ticks");
+                p.toggle("easy_air", "Easy air place", d.easy_air);
             })
             .page("display", "Display", |p| {
                 p.toggle("render", "Rendering", d.render);
@@ -487,6 +534,7 @@ fn menu() -> &'static menus::Menu {
 }
 
 fn load_settings(game: &Game<'_>, s: &mut State) {
+    ensure_binds(game, s);
     if s.settings_loaded {
         return;
     }
@@ -532,6 +580,9 @@ fn load_settings(game: &Game<'_>, s: &mut State) {
         tool_hud: m.bool(st, "tool_hud"),
         tool_placement: m.choice(st, "tool_mode") == "placement",
         placement_boxes: m.bool(st, "placement_boxes"),
+        easy_place: m.bool(st, "easy_place"),
+        easy_interval: (m.number(st, "easy_interval") as u32).max(1),
+        easy_air: m.bool(st, "easy_air"),
     };
 }
 
@@ -614,6 +665,9 @@ fn save_settings(game: &Game<'_>, s: &Settings) {
     set("tool_hud", s.tool_hud.to_string());
     set("tool_mode", if s.tool_placement { "placement" } else { "area" }.into());
     set("placement_boxes", s.placement_boxes.to_string());
+    set("easy_place", s.easy_place.to_string());
+    set("easy_interval", s.easy_interval.to_string());
+    set("easy_air", s.easy_air.to_string());
 }
 
 /// Saves where the placements are: the selected one as the last one (`/horizonmatica reload`),
@@ -735,7 +789,8 @@ pub(super) fn listed() -> super::native_hooks::NativeMod {
         id: ID.into(),
         title: format!("Horizonmatica {VERSION}"),
         description: DESCRIPTION.into(),
-        keys: KEYS.iter().map(|(n, l, d)| [n.to_string(), l.to_string(), d.to_string()]).collect(),
+        // Bound on the mod's own Keys page, not in Options > Mods.
+        keys: Vec::new(),
     }
 }
 
@@ -861,7 +916,7 @@ fn menu_action(game: &mut Game<'_>, action: &str) {
             });
             run(game, &["mirror", next])
         }
-        "layer_next" => {
+        "layer_next" | "layer_mode" => {
             let next = next_layer_mode();
             run(game, &["layer", next])
         }
@@ -873,8 +928,20 @@ fn menu_action(game: &mut Game<'_>, action: &str) {
         "unload_all" => run(game, &["unload", "all"]),
         "select_next" => run(game, &["select", "next"]),
         "show_toggle" => run(game, &["show", "toggle"]),
-        "printer_toggle" => run(game, &["printer"]),
-        "materials" => run(game, &["materials", "copy"]),
+        "printer_toggle" | "toggle_printer" => run(game, &["printer"]),
+        "toggle_render" => run(game, &["render"]),
+        "layer_up" => run(game, &["layer", "up"]),
+        "layer_down" => run(game, &["layer", "down"]),
+        "toggle_easy_place" => run(game, &["easyplace"]),
+        "toggle_tool" => {
+            let on = with(|s| s.settings.tool);
+            run(game, &["tool", if on { "off" } else { "on" }])
+        }
+        "select_prev" => run(game, &["select", "prev"]),
+        "area_pos1" => run(game, &["pos1", "here"]),
+        "area_pos2" => run(game, &["pos2", "here"]),
+        "area_clear" => run(game, &["area", "clear"]),
+        "materials" | "materials_copy" => run(game, &["materials", "copy"]),
         other => match other.strip_prefix("load:") {
             Some(file) => run(game, &["load", file]),
             None => return,
@@ -1442,6 +1509,7 @@ const WORDS: &[(&str, &[&str], Option<&str>)] = &[
     ("info", &[], None),
     ("materials", &["on", "off", "copy"], None),
     ("printer", &["on", "off", "speed", "reach", "air"], None),
+    ("easyplace", &["on", "off", "every", "air"], None),
     ("folder", &[], None),
     ("credits", &[], None),
 ];
@@ -1455,6 +1523,8 @@ const SUBWORDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("printer", "speed", &[], Some("ticks")),
     ("printer", "reach", &[], Some("blocks")),
     ("printer", "air", &["on", "off"], None),
+    ("easyplace", "every", &[], Some("ticks")),
+    ("easyplace", "air", &["on", "off"], None),
 ];
 
 /// A word under `parent` that a command may end with.
@@ -1553,6 +1623,7 @@ const HELP: &[&str] = &[
     "/horizonmatica radius <blocks>|view | faces <n>|none | fluids on|off",
     "/horizonmatica highlight missing|wrong [on|off] | highlight item <item>|all | highlight off",
     "/horizonmatica printer on|off | air on|off | speed <ticks> | reach <blocks>",
+    "/horizonmatica easyplace on|off | easyplace every <ticks> | easyplace air on|off: hold right click to place the block the schematic wants",
     "/horizonmatica credits: who made the original Litematica and its printer",
     "(/hm works as a short form)",
 ];
@@ -2102,6 +2173,34 @@ fn run(game: &mut Game<'_>, args: &[&str]) -> Result<Vec<String>, String> {
             with(|s| save_settings(game, &s.settings));
             Ok(vec![msg])
         }
+        "easyplace" | "easy" => {
+            let msg = with(|s| {
+                let st = &mut s.settings;
+                let msg = match rest.first().copied() {
+                    Some("every") => {
+                        st.easy_interval = int(rest.get(1), "ticks")?.clamp(1, 10) as u32;
+                        format!("Easy place: one block every {} ticks", st.easy_interval)
+                    }
+                    Some("air") => {
+                        st.easy_air = on_off(rest.get(1), st.easy_air)?;
+                        format!(
+                            "Easy air place {}",
+                            if st.easy_air { "ON — ghost blocks need no neighbouring block" } else { "OFF" }
+                        )
+                    }
+                    v => {
+                        st.easy_place = on_off(v.as_ref(), st.easy_place)?;
+                        format!(
+                            "Easy place {}",
+                            if st.easy_place { "ON — hold right click to place what the schematic wants" } else { "OFF" }
+                        )
+                    }
+                };
+                Ok::<_, String>(msg)
+            })?;
+            with(|s| save_settings(game, &s.settings));
+            Ok(vec![msg])
+        }
         other => Err(format!("unknown subcommand {other}; /horizonmatica help")),
     }
 }
@@ -2110,14 +2209,130 @@ fn short(item: &str) -> &str {
     item.strip_prefix("minecraft:").unwrap_or(item)
 }
 
+/// A key's name as the Keys page shows it: `key.keyboard.page.up` → `PAGE UP`, `key.mouse.4` → `MOUSE 4`.
+fn key_label(name: &str) -> String {
+    let bare = name.strip_prefix("key.keyboard.").or_else(|| name.strip_prefix("key.")).unwrap_or(name);
+    if bare.is_empty() {
+        return "not bound".into();
+    }
+    bare.replace('.', " ").to_uppercase()
+}
+
 // ---------------------------------------------------------------- keys
+
+/// Loads the binds once: a key the player set on the Keys page, else the one Options > Mods
+/// kept for it, else the default.
+fn ensure_binds(game: &Game<'_>, s: &mut State) {
+    if s.binds.is_some() {
+        return;
+    }
+    s.binds = Some(
+        BINDS
+            .iter()
+            .map(|(id, _, default)| {
+                let key = game.native_setting(ID, &bind_file(id)).unwrap_or_else(|| game.native_mod_key(ID, id, default));
+                (id.to_string(), key)
+            })
+            .collect(),
+    );
+}
+
+fn bind_file(id: &str) -> String {
+    format!("key_{id}")
+}
+
+/// The key bound to `id` ("" when none).
+fn key_of(game: &Game<'_>, id: &str) -> String {
+    with(|s| {
+        ensure_binds(game, s);
+        s.binds.as_ref().and_then(|b| b.iter().find(|(i, _)| i == id)).map(|(_, k)| k.clone()).unwrap_or_default()
+    })
+}
+
+/// Binds `id` to `key` ("" unbinds it), taking the key from any other action first, and saves it.
+fn set_bind(game: &Game<'_>, id: &str, key: &str) {
+    let mut changed = Vec::new();
+    with(|s| {
+        ensure_binds(game, s);
+        let Some(binds) = s.binds.as_mut() else { return };
+        for (i, k) in binds.iter_mut() {
+            if !key.is_empty() && k == key && i != id {
+                *k = String::new();
+                changed.push(i.clone());
+            }
+        }
+        if let Some((_, k)) = binds.iter_mut().find(|(i, _)| i == id) {
+            *k = key.to_string();
+            changed.push(id.to_string());
+        }
+    });
+    for i in changed {
+        let value = key_of(game, &i);
+        game.native_set_setting(ID, &bind_file(&i), &value);
+    }
+}
+
+/// Binds every action to its default key.
+fn reset_binds(game: &Game<'_>) {
+    for (id, _, default) in BINDS {
+        set_bind(game, id, default);
+    }
+}
+
+/// The Keys tab's capture: the next key pressed on the screen is bound to the action waiting for
+/// one; Backspace and Delete clear it. Esc is the screen's own and closes it, which ends the wait.
+fn capture_key(game: &Game<'_>, ui: &mut menus::Ui<'_>) {
+    use winit::keyboard::KeyCode;
+    const BINDABLE: &[KeyCode] = &[
+    KeyCode::KeyA, KeyCode::KeyB, KeyCode::KeyC, KeyCode::KeyD, KeyCode::KeyE, KeyCode::KeyF, KeyCode::KeyG,
+    KeyCode::KeyH, KeyCode::KeyI, KeyCode::KeyJ, KeyCode::KeyK, KeyCode::KeyL, KeyCode::KeyM, KeyCode::KeyN,
+    KeyCode::KeyO, KeyCode::KeyP, KeyCode::KeyQ, KeyCode::KeyR, KeyCode::KeyS, KeyCode::KeyT, KeyCode::KeyU,
+    KeyCode::KeyV, KeyCode::KeyW, KeyCode::KeyX, KeyCode::KeyY, KeyCode::KeyZ, KeyCode::Digit1,
+    KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7,
+    KeyCode::Digit8, KeyCode::Digit9, KeyCode::Digit0, KeyCode::Enter, KeyCode::Escape, KeyCode::Backspace,
+    KeyCode::Tab, KeyCode::Space, KeyCode::Minus, KeyCode::Equal, KeyCode::BracketLeft, KeyCode::BracketRight,
+    KeyCode::Backslash, KeyCode::Semicolon, KeyCode::Quote, KeyCode::Backquote, KeyCode::Comma,
+    KeyCode::Period, KeyCode::Slash, KeyCode::CapsLock, KeyCode::IntlBackslash, KeyCode::IntlRo,
+    KeyCode::IntlYen, KeyCode::Lang1, KeyCode::Lang2, KeyCode::Lang3, KeyCode::Lang4, KeyCode::Lang5,
+    KeyCode::Help, KeyCode::Select, KeyCode::Again, KeyCode::Undo, KeyCode::Cut, KeyCode::Copy,
+    KeyCode::Paste, KeyCode::Find, KeyCode::F1, KeyCode::F2, KeyCode::F3, KeyCode::F4, KeyCode::F5,
+    KeyCode::F6, KeyCode::F7, KeyCode::F8, KeyCode::F9, KeyCode::F10, KeyCode::F11, KeyCode::F12,
+    KeyCode::F13, KeyCode::F14, KeyCode::F15, KeyCode::F16, KeyCode::F17, KeyCode::F18, KeyCode::F19,
+    KeyCode::F20, KeyCode::F21, KeyCode::F22, KeyCode::F23, KeyCode::F24, KeyCode::PrintScreen,
+    KeyCode::ScrollLock, KeyCode::Pause, KeyCode::Insert, KeyCode::Home, KeyCode::PageUp, KeyCode::Delete,
+    KeyCode::End, KeyCode::PageDown, KeyCode::ArrowRight, KeyCode::ArrowLeft, KeyCode::ArrowDown,
+    KeyCode::ArrowUp, KeyCode::NumLock, KeyCode::NumpadDivide, KeyCode::NumpadMultiply,
+    KeyCode::NumpadSubtract, KeyCode::NumpadAdd, KeyCode::NumpadEnter, KeyCode::Numpad1, KeyCode::Numpad2,
+    KeyCode::Numpad3, KeyCode::Numpad4, KeyCode::Numpad5, KeyCode::Numpad6, KeyCode::Numpad7,
+    KeyCode::Numpad8, KeyCode::Numpad9, KeyCode::Numpad0, KeyCode::NumpadDecimal, KeyCode::NumpadEqual,
+    KeyCode::NumpadComma, KeyCode::NumpadBackspace, KeyCode::NumpadHash, KeyCode::NumpadMemoryAdd,
+    KeyCode::NumpadClear, KeyCode::NumpadClearEntry, KeyCode::ContextMenu, KeyCode::ControlLeft,
+    KeyCode::ShiftLeft, KeyCode::AltLeft, KeyCode::SuperLeft, KeyCode::ControlRight, KeyCode::ShiftRight,
+    KeyCode::AltRight, KeyCode::SuperRight,
+    ];
+    let Some(id) = with(|s| s.capture.clone()) else { return };
+    let Some(code) = BINDABLE.iter().copied().find(|&code| ui.key(code)) else { return };
+    let name = if matches!(code, KeyCode::Backspace | KeyCode::Delete) { Some("") } else { horizon_client::keybinds::key_name(code) };
+    let Some(name) = name else { return };
+    set_bind(game, &id, name);
+    let label = BINDS.iter().find(|(i, ..)| *i == id).map_or("", |(_, l, _)| *l);
+    with(|s| {
+        s.capture = None;
+        s.ui_message = format!("{label}: {}", key_label(name));
+    });
+}
 
 pub(super) fn key(game: &mut Game<'_>, key: &str, pressed: bool) {
     if !pressed || !game.native_on(ID) || !game.native_playing() {
         return;
     }
-    let bound = |name: &str, default: &str| game.native_mod_key(ID, name, default) == key;
-    let hit = KEYS.iter().find(|(n, _, d)| bound(n, d)).map(|(n, _, _)| *n);
+    let hit = with(|s| {
+        // Back in the game: a wait for a key on the Keys tab is over.
+        s.capture = None;
+        ensure_binds(game, s);
+        s.binds.as_ref().and_then(|b| b.iter().find(|(_, k)| !k.is_empty() && k == key)).map(|(i, _)| i.clone())
+    });
+    let hit = hit.as_deref();
     if hit == Some("move_mode") {
         toggle_move_mode(game);
         return;
@@ -2138,20 +2353,6 @@ pub(super) fn key(game: &mut Game<'_>, key: &str, pressed: bool) {
         return;
     }
     let Some(action) = hit else { return };
-    let args: &[&str] = match action {
-        "toggle_render" => &["render"],
-        "layer_up" => &["layer", "up"],
-        "layer_down" => &["layer", "down"],
-        "toggle_printer" => &["printer"],
-        "toggle_materials" => &["materials"],
-        "layer_mode" => {
-            let next = next_layer_mode();
-            let r = run(game, &["layer", next]);
-            report(game, r);
-            return;
-        }
-        _ => return,
-    };
     if action == "toggle_materials" {
         // The HUD list only: don't fill the chat each press.
         with(|s| {
@@ -2160,8 +2361,7 @@ pub(super) fn key(game: &mut Game<'_>, key: &str, pressed: bool) {
         });
         return;
     }
-    let r = run(game, args);
-    report(game, r);
+    menu_action(game, action);
 }
 
 // ---------------------------------------------------------------- move mode
@@ -2315,6 +2515,7 @@ pub(super) fn tick(game: &mut Game<'_>) {
     rebuild_mesh(game);
     marks_step(game);
     printer_step(game);
+    easy_place_step(game);
     completions_step(game);
 }
 
@@ -3319,6 +3520,153 @@ fn printer_step(game: &mut Game<'_>) {
     }
 }
 
+// ---------------------------------------------------------------- easy place
+
+/// Whether easy place has a say right now.
+fn easy_active(game: &Game<'_>) -> bool {
+    let (on, shown, moving) = with(|s| (s.settings.easy_place, s.slots.iter().any(|x| x.shown), s.moving));
+    on && shown && !moving && game.native_playing() && !game.spectator() && !tool_held(game)
+}
+
+/// The block the view asks for, for easy place: the player's own two cells can't take one.
+fn easy_target(game: &Game<'_>) -> Option<([i32; 3], BlockState)> {
+    let eye = game.eye_position()?;
+    let feet = [eye[0].floor() as i32, (eye[1] - 1.62).floor() as i32, eye[2].floor() as i32];
+    let (cell, status, wanted) = first_wanted(game, &[feet, [feet[0], feet[1] + 1, feet[2]]])?;
+    (status == Status::Missing && materials::items_for_state(&wanted) > 0).then_some((cell, wanted))
+}
+
+/// Each tick: the game's own held use is stopped before it places a block, the block looked at
+/// is taken in hand, and with the button down the next one goes in.
+fn easy_place_step(game: &mut Game<'_>) {
+    // A screen took the release of the button with it.
+    if !game.native_playing() {
+        with(|s| {
+            s.right_down = false;
+            s.easy_taken = false;
+        });
+        return;
+    }
+    if !easy_active(game) {
+        return;
+    }
+    if game.right && easy_place_refuses(game) {
+        game.right = false;
+    }
+    if game.using.is_some() || easy_select(game) {
+        return;
+    }
+    let (down, next) = with(|s| (s.right_down, s.easy_next));
+    if down && game.ticks >= next {
+        easy_place_click(game);
+    }
+}
+
+/// Takes the block looked at in hand. True when the hand is changing: the click waits a tick, so
+/// it can't go out with what was held before.
+fn easy_select(game: &mut Game<'_>) -> bool {
+    if with(|s| s.settings.printer_on) {
+        return false;
+    }
+    let Some((_, wanted)) = easy_target(game) else { return false };
+    let Some(item) = with(|s| item_for(game, s, &wanted)) else { return false };
+    let held = game.inventory.get(game.selected).and_then(Option::as_ref).is_some_and(|st| *st.item == *item);
+    if held {
+        with(|s| s.easy_pick = None);
+        return false;
+    }
+    let now = game.ticks;
+    if with(|s| s.easy_pick.as_ref().is_some_and(|(i, until)| *i == item && now < *until)) {
+        return true;
+    }
+    let taken = take_in_hand(game, &item);
+    with(|s| match taken {
+        Ok(()) => {
+            s.easy_pick = Some((item, now + 5));
+            s.easy_note.clear();
+        }
+        Err(e) => {
+            s.easy_note = format!("{}: {e}", short(&item));
+            s.easy_pick = Some((item, now + 20));
+        }
+    });
+    true
+}
+
+/// Places the block the schematic wants where the view first meets one, when it is the item in
+/// hand and a click gives exactly that block. True when the click belongs to easy place.
+fn easy_place_click(game: &mut Game<'_>) -> bool {
+    if !easy_active(game) {
+        return false;
+    }
+    let Some(eye) = game.eye_position() else { return false };
+    let Some((p, wanted)) = easy_target(game) else { return false };
+    let now = game.ticks;
+    let (interval, air, retry) =
+        with(|s| (s.settings.easy_interval, s.settings.easy_air, s.settings.printer.retry_ticks));
+    // Just clicked and the world hasn't caught up: a second click could make a slab double.
+    if with(|s| s.recent.blocked(p, now, retry)) {
+        return true;
+    }
+    let held = game.inventory.get(game.selected).and_then(Option::as_ref).map(|st| st.item.to_string());
+    if with(|s| item_for(game, s, &wanted)) != held {
+        return false;
+    }
+    let Some(item) = held else { return false };
+    let reach = game.reach();
+    let Some(click) = aim_for(game, eye, reach, p, &wanted, &item, air) else {
+        // With air place it would go: then nothing but the missing neighbour is in the way.
+        let lonely = !air && aim_for(game, eye, reach, p, &wanted, &item, true).is_some();
+        let why = if lonely { ": no block next to it (easy air place is off)" } else { " can't go there as wanted from here" };
+        with(|s| s.easy_note = format!("{}{why}", short(&wanted.name)));
+        return false;
+    };
+    if do_click(game, &click).is_err() {
+        return false;
+    }
+    with(|s| {
+        s.easy_next = now + u64::from(interval.max(1));
+        s.placed += 1;
+        s.recent.mark(p, now);
+        s.easy_note.clear();
+    });
+    true
+}
+
+/// With easy place active, whether this click would make the game place a block on its own
+/// (asked of the game's placement, so food, buckets and an empty hand don't count). With nothing
+/// to click yet a block in hand counts too: the aim can move before the game gets to the press.
+/// Using a chest, door or lever stays possible; Shift places against them, so not then.
+fn easy_place_refuses(game: &mut Game<'_>) -> bool {
+    use winit::keyboard::KeyCode;
+    if !easy_active(game) {
+        return false;
+    }
+    let Some(item) = game.inventory.get(game.selected).and_then(Option::as_ref).map(|st| st.item.to_string()) else { return false };
+    let Some((origin, dir)) = game.aim() else { return false };
+    let reach = game.reach();
+    let Some(hit) = game.clip_ray(origin, dir, reach) else {
+        return game.pack.assets.registry.default_state(&item).is_some();
+    };
+    let sneaking = game.keys.contains(&KeyCode::ShiftLeft) || game.keys.contains(&KeyCode::ShiftRight);
+    let clicked = game.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
+    if !sneaking && with(|s| interactive(&game_state(game, &mut s.states, clicked).name)) {
+        return false;
+    }
+    let ctx = PlaceContext {
+        clicked_pos: BlockPos::new(hit.pos[0], hit.pos[1], hit.pos[2]),
+        face: face_dir(hit.face),
+        hit: Vec3::new(hit.point[0], hit.point[1], hit.point[2]),
+        inside: false,
+        yaw: game.yaw,
+        pitch: game.pitch,
+        sneaking,
+        item,
+        can_use_game_master_blocks: game.can_use_game_master_blocks(),
+    };
+    game.with_level(|b, level, ticks| b.placement_state(level, ticks, &ctx)).is_some()
+}
+
 /// Makes `click`: the camera never moves (like litematica-printer, only the click carries the
 /// look). Locally it is used within this tick, so the view is back before the next frame; on a
 /// server the look is sent just before it and the real one the next tick.
@@ -3327,8 +3675,10 @@ fn do_click(game: &mut Game<'_>, click: &Click) -> Result<(), String> {
     if game.remote.is_some() {
         send_look(game, click.yaw, click.pitch);
         game.forced_hit = Some(click.hit);
+        with(|s| s.own_click = true);
         let _ = game.play_mouse(winit::event::MouseButton::Right, true);
         let _ = game.play_mouse(winit::event::MouseButton::Right, false);
+        with(|s| s.own_click = false);
         with(|s| s.server_look = true);
         return Ok(());
     }
@@ -3724,12 +4074,31 @@ pub(super) fn mouse(game: &mut Game<'_>, button: winit::event::MouseButton, pres
         MouseButton::Middle => 2,
         _ => return false,
     };
+    // The mod's own clicks come through here too: those go to the game.
+    if with(|s| s.own_click) {
+        return false;
+    }
+    if b == 1 {
+        with(|s| s.right_down = pressed);
+    }
     // A release goes where its press went.
     if !pressed {
+        if b == 1 && with(|s| std::mem::take(&mut s.easy_taken)) {
+            return true;
+        }
         return with(|s| std::mem::take(&mut s.tool_down[b]));
     }
     if !game.native_on(ID) || !game.native_playing() {
         return false;
+    }
+    // Easy place: the press is taken when it places, and when the game's own use would place
+    // a block the schematic doesn't want there.
+    if b == 1 {
+        let taken = !tool_held(game) && (easy_place_click(game) || easy_place_refuses(game));
+        with(|s| s.easy_taken = taken);
+        if taken {
+            return true;
+        }
     }
     if !tool_held(game) {
         // Middle click on a block the schematic still wants: that block, as the game's own pick.
@@ -3776,9 +4145,9 @@ pub(super) fn mouse(game: &mut Game<'_>, button: winit::event::MouseButton, pres
 }
 
 /// The first block along the view within reach that a shown placement wants and the world doesn't
-/// have yet, up to and with the first real block. The cell the eye is in doesn't count: the player
-/// is inside that one.
-fn wanted_in_view(game: &Game<'_>) -> Option<BlockState> {
+/// have yet, up to and with the first real block: where it is, how it stands, what is wanted. The
+/// cell the eye is in doesn't count, the player is inside that one; nor do the cells in `skip`.
+fn first_wanted(game: &Game<'_>, skip: &[[i32; 3]]) -> Option<([i32; 3], Status, BlockState)> {
     let (origin, dir) = game.aim()?;
     let reach = game.reach();
     let limit = game
@@ -3795,7 +4164,7 @@ fn wanted_in_view(game: &Game<'_>) -> Option<BlockState> {
             continue;
         }
         last = cell;
-        if !layer.contains(cell[1]) {
+        if !layer.contains(cell[1]) || skip.contains(&cell) {
             continue;
         }
         let Some((status, wanted)) = with(|s| status_at(game, s, cell)) else { continue };
@@ -3803,10 +4172,14 @@ fn wanted_in_view(game: &Game<'_>) -> Option<BlockState> {
             && !wanted.is_air()
             && !matches!(wanted.name.as_str(), "minecraft:water" | "minecraft:lava" | "minecraft:bubble_column")
         {
-            return Some(wanted);
+            return Some((cell, status, wanted));
         }
     }
     None
+}
+
+fn wanted_in_view(game: &Game<'_>) -> Option<BlockState> {
+    first_wanted(game, &[]).map(|(.., wanted)| wanted)
 }
 
 /// Takes the block the schematic wants where the player looks, like the game's own pick block: from
@@ -4437,6 +4810,12 @@ pub(super) fn hud(game: &mut Game<'_>, batch: &mut HudBatch, corners: &mut Corne
                 l.push((s.printer_note.clone(), 0xAAAAAA));
             }
         }
+        if s.settings.easy_place {
+            l.push(("Easy place ON: only the schematic's blocks".to_string(), 0xFF55FF));
+            if !s.easy_note.is_empty() {
+                l.push((s.easy_note.clone(), 0xAAAAAA));
+            }
+        }
         if s.settings.highlight_missing || s.settings.highlight_wrong {
             let nearest = if s.mesh.marks_full { " (the nearest only)" } else { "" };
             l.push((format!("{} · {}{nearest}", highlight_text(s), s.mesh.marks_count), 0x55FFFF));
@@ -4588,8 +4967,16 @@ pub(super) fn screen(game: &mut Game<'_>, ui: &mut menus::Ui<'_>) {
         let shown = ui.fit(game, name, w / 2.0 - 50.0);
         ui.text_right(game, x0 + w, 7.0, &shown, 0x55FFFF);
     }
-    const TABS: [&str; 8] = ["Load", "Placement", "Save", "Tool", "Printer", "Display", "Materials", "Credits"];
-    let tab = with(|s| s.ui_tab).min(TABS.len() - 1);
+    // Eight fit with their names whole; the credits are a button of their own at the top.
+    const TABS: [&str; 8] = ["Load", "Placement", "Save", "Tool", "Printer", "Display", "Materials", "Keys"];
+    const CREDITS: usize = TABS.len();
+    let tab = with(|s| s.ui_tab).min(CREDITS);
+    if tab == 7 {
+        // Before the keys below: the key being bound isn't also a shortcut.
+        capture_key(game, ui);
+    } else {
+        with(|s| s.capture = None);
+    }
     let mut next = ui.tabs(game, [x0, 20.0, w, 20.0], &TABS, tab);
     // 1-8 switch tabs, M closes (while no edit box has the keys).
     let digits = [
@@ -4625,12 +5012,16 @@ pub(super) fn screen(game: &mut Game<'_>, ui: &mut menus::Ui<'_>) {
         4 => tab_printer(game, ui, body),
         5 => tab_display(game, ui, body),
         6 => tab_materials(game, ui, body),
+        7 => tab_keys(game, ui, body),
         _ => tab_credits(game, ui, body),
     }
     let fy = ui.height - 25.0;
     let msg = with(|s| s.ui_message.clone());
     if !msg.is_empty() {
         ui.text_fit(game, x0, fy + 6.0, w - 110.0, &msg, 0xFFFF55);
+    }
+    if ui.button(game, [x0, 2.0, 50.0, 16.0], "Credits", tab != CREDITS) {
+        with(|s| s.ui_tab = CREDITS);
     }
     if ui.button(game, [x0 + w - 100.0, fy, 100.0, 20.0], "Done", true) {
         ui.close();
@@ -4777,7 +5168,7 @@ fn tab_placement(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
 
     // Left: the list; a click selects.
     let lw = (r[2] * 0.38).floor();
-    let list = [r[0], r[1], lw, r[3] - 24.0];
+    let list = [r[0], r[1], lw, r[3] - 96.0];
     ui.fill(game, list, 0x9000_0000);
     ui.frame(game, list, 0xFF50_5050);
     let row_h = 26.0;
@@ -4822,6 +5213,13 @@ fn tab_placement(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
         act(game, &["select", &(i + 1).to_string()]);
     }
     let by = r[1] + r[3] - 20.0;
+    let event = {
+        let mut store = menus::GameStore { game: &*game, id: ID };
+        ui.settings(game, menu(), "easy_place", &mut store, [r[0], by - 72.0, lw, 0.0], 1).0
+    };
+    if event != menus::Event::None {
+        settings_changed(game);
+    }
     let half = ((lw - 4.0) / 2.0).floor();
     if ui.button_tip(game, [r[0], by, half, 20.0], "Load more", true, &["Another schematic, as one more placement"]) {
         with(|s| s.ui_tab = 0);
@@ -4851,11 +5249,14 @@ fn tab_placement(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
     });
     let Some((name, origin, size, rotation, mirror, layers, moving, shown, locked, tally, tool_placement)) = info else { return };
     let x = r[0] + lw + 8.0;
-    let w = r[2] - lw - 8.0;
+    // Right: the selected placement, scrolled where the window is too low for it (at 720p).
+    let area = [x, r[1], r[2] - lw - 8.0, r[3]];
+    let content = 37.0 + 8.0 * 24.0 - 4.0;
+    let w = if content > area[3] { area[2] - 10.0 } else { area[2] };
     let free = !locked;
     let half = ((w - 4.0) / 2.0).floor();
     let third = ((w - 8.0) / 3.0).floor();
-    let mut y = r[1];
+    let (mut y, mark) = ui.scroll_begin("placement_info", area, content);
     ui.text_fit(game, x, y + 1.0, w, &format!("{}. {name}", selected + 1), 0xFFFFFF);
     y += 12.0;
     ui.text_fit(game, x, y, w, &format!("{} x {} x {} · rotation {rotation} · mirror {mirror}", size[0], size[1], size[2]), 0xC0C0C0);
@@ -4971,6 +5372,7 @@ fn tab_placement(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
     if ui.button_tip(game, [x, y, w, 20.0], &label, true, &tip) {
         act(game, &["tool", "mode", "toggle"]);
     }
+    ui.scroll_end(game, "placement_info", area, content, mark);
 }
 
 fn tab_save(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
@@ -5162,6 +5564,46 @@ fn tab_tool(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
         menus::Event::Changed(_) => settings_changed(game),
         menus::Event::Action(a) => menu_action(game, &a),
     }
+}
+
+/// The Keys tab: every action with its key; a click on the key waits for a new one.
+fn tab_keys(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {
+    let (binds, capture) = with(|s| (s.binds.clone().unwrap_or_default(), s.capture.clone()));
+    let list = [r[0], r[1], r[2], r[3] - 24.0];
+    ui.fill(game, list, 0x9000_0000);
+    ui.frame(game, list, 0xFF50_5050);
+    let row_h = 22.0;
+    let content = BINDS.len() as f32 * row_h + 4.0;
+    let (y0, mark) = ui.scroll_begin("keys", list, content);
+    let button_w = 110.0;
+    let mut picked = None;
+    for (i, (id, label, _)) in BINDS.iter().enumerate() {
+        let y = y0 + 2.0 + i as f32 * row_h;
+        if y + row_h < list[1] || y > list[1] + list[3] {
+            continue;
+        }
+        let key = binds.iter().find(|(b, _)| b == id).map_or("", |(_, k)| k.as_str());
+        let waiting = capture.as_deref() == Some(*id);
+        ui.text_fit(game, list[0] + 6.0, y + 6.0, list[2] - button_w - 24.0, label, 0xE0E0E0);
+        let shown = if waiting { "> press a key <".to_string() } else { key_label(key) };
+        if ui.button(game, [list[0] + list[2] - button_w - 10.0, y + 1.0, button_w, 20.0], &shown, true) {
+            picked = Some(if waiting { None } else { Some(id.to_string()) });
+        }
+    }
+    ui.scroll_end(game, "keys", list, content, mark);
+    if let Some(next) = picked {
+        with(|s| s.capture = next);
+    }
+    let by = r[1] + r[3] - 20.0;
+    if ui.button(game, [r[0], by, 120.0, 20.0], "Reset all keys", true) {
+        reset_binds(game);
+        with(|s| {
+            s.capture = None;
+            s.ui_message = "All keys are back to their defaults".into();
+        });
+    }
+    let hint = if capture.is_some() { "Press a key. Backspace clears, a click cancels." } else { "Click a key to change it." };
+    ui.text_fit(game, r[0] + 128.0, by + 6.0, r[2] - 128.0, hint, 0xA0A0A0);
 }
 
 fn tab_printer(game: &mut Game<'_>, ui: &mut menus::Ui<'_>, r: menus::Rect) {

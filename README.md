@@ -48,6 +48,7 @@ show schematics as ghost blocks, check your build against them, get a material l
 | Material list (HUD with item icons, menu, copy as a table for spreadsheets), missing vs. carried | ✅ |
 | Own menu screen (M) drawn with the game's widgets | ✅ |
 | **Printer**: places missing blocks within reach automatically, facing the right way | ✅ |
+| **Easy place**: look at a ghost block to take its block in hand, hold right click to place it; nothing else can be placed while it is on | ✅ |
 | Area selection and saving it as a `.litematic` (blocks and their states) | ✅ |
 | Saving block entity data (chest contents, sign texts) and entities, several regions, Easy Place protocol | ❌ (not yet) |
 
@@ -65,7 +66,7 @@ building them.
 
    or in the launcher: **Mods** → install a native mod from a folder (or a `.hnmod` file) → **Build**.
    The first build downloads Rust and takes 20–30 minutes; later builds are faster.
-3. To get a package: `python tools/package.py` writes `dist/horizonmatica-0.2.0.hnmod`.
+3. To get a package: `python tools/package.py` writes `dist/horizonmatica-0.3.0.hnmod`.
 
 **Version:** the mod uses game internals (block models, placement prediction, the data fixer, the Debug Options
 screen for its menu), so it is pinned to one Horizon commit: `horizon_revision` in
@@ -85,7 +86,7 @@ RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
 Check a download with:
 
 ```
-minisign -Vm horizonmatica-0.2.0.hnmod -P RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
+minisign -Vm horizonmatica-0.3.0.hnmod -P RWS+BRoCJslNCFapck3cbG2VFQcjlr1MUH5m3+CWA8zhJecoBoja7X94
 ```
 
 ## Usage
@@ -132,6 +133,7 @@ tells the format by the contents. When two files share a name, loading without a
 | `/horizonmatica info` | Position, progress, errors |
 | `/horizonmatica materials [on\|off]` · `materials copy` | The material list in the HUD on or off; copy it to the clipboard as a table for a spreadsheet |
 | `/horizonmatica printer on\|off` · `air on\|off` · `speed <ticks>` · `reach <blocks>` | Printer |
+| `/horizonmatica easyplace on\|off` · `every <ticks>` · `air on\|off` | Easy place |
 | `/horizonmatica credits` | Who made the originals |
 
 `/hm` is the short form. The chat completes the commands: type `/hm ` and it offers the subcommands and their
@@ -198,7 +200,7 @@ Set it up in the menu's **Tool** tab: which item, its reach (up to 256 blocks), 
 the one in front of it (handy for selecting the air above a floor), and whether water and lava stop it (off: it
 goes through to the ground). `/hm tool off` turns it off, `/hm tool <item>` takes another item.
 
-Keys (rebind them in **Options › Mods › Horizonmatica**):
+Keys (the defaults; any action can be bound on the menu's **Keys** tab):
 
 | Key | Action |
 |---|---|
@@ -229,18 +231,18 @@ The printer pauses while move mode is on.
 
 **M** opens Horizonmatica's own screen, drawn with the game's widgets (buttons, sliders, edit boxes, scroll lists,
 tooltips, item icons) by [horizon-menus](libs/horizon-menus/README.md). The game keeps running behind it. **Esc**,
-**M** or **Done** close it, **1–8** switch tabs.
+**M** or **Done** close it, **1–8** switch tabs, the **Credits** button at the top left shows who made the originals.
 
 | Tab | Contents |
 |---|---|
 | Load | Search box, scrolling file list with sizes, details of the picked file (size, blocks, format, author), load as another placement (or click the file twice), reload the last one, open the folder |
-| Placement | All placements as a list (click one to select it); next to it the selected one: progress, show or hide, lock, unload, the origin as edit boxes, nudge buttons ±X/±Y/±Z (Shift: 10 blocks), move to me, move mode, rotate, mirror, layers, the tool's mode |
+| Placement | All placements as a list (click one to select it); next to it the selected one: progress, show or hide, lock, unload, the origin as edit boxes, nudge buttons ±X/±Y/±Z (Shift: 10 blocks), move to me, move mode, rotate, mirror, layers, the tool's mode; easy place on/off |
 | Save | The area selection's corners as edit boxes (or the block you look at, or where you stand), its size, a name, save (a second click overwrites an existing file) |
 | Tool | The selection tool: on/off, which item (pick one of eight with their icons, type an id, or take the one in your hand), its reach, whether a click marks the block hit or the one in front of it, whether water and lava stop it, its controls in the HUD |
 | Printer | On/off, blocks placed, speed and reach as sliders, air place |
 | Display | Overlay and HUD settings (opacity, render radius or view distance, face limit, water and lava), and what the overlay holds right now |
 | Materials | Material list with item icons: missing, total, carried; copy it for a spreadsheet; the HUD list on/off |
-| Credits | The originals and their authors |
+| Keys | Every action with its key: click one and press the new key, or reset them all |
 
 When the screen can't open (over another screen, say), M opens the mod's page in **Options › Mods** instead, with the
 same settings as buttons (Shift + click steps backwards).

@@ -87,11 +87,19 @@ The chat completes the commands: type `/hm ` and it offers the subcommands, narr
 | `/hm printer reach <blocks>` | Reach, from 1 to 6 blocks | Printer: **Reach** |
 | `/hm printer air [on\|off]` | Placing without a neighbouring block | Printer: **Air place** |
 
+## Easy place
+
+| Command | Effect | In the menu |
+|---|---|---|
+| `/hm easyplace [on\|off]` | Easy place on or off | [Placement](Placement.md#easy-place): **Easy place** |
+| `/hm easyplace every <ticks>` | One block every 1 to 10 ticks while the button is held | Placement: **Easy place every** |
+| `/hm easyplace air [on\|off]` | Ghost blocks without a neighbouring block | Placement: **Easy air place** |
+
 ## Other
 
 | Command | Effect | In the menu |
 |---|---|---|
 | `/hm materials [on\|off]` | The material list in the HUD | [Materials](Materials.md): **HUD list** |
 | `/hm materials copy` | Copies the material list to the clipboard as a table | Materials: **Copy** |
-| `/hm credits` | Prints who made the originals | Credits: **Show the credits in chat** |
+| `/hm credits` | Prints who made the originals | **Credits** button: **Show the credits in chat** |
 | `/hm help` | Lists the commands | — |

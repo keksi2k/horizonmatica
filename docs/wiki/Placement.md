@@ -72,3 +72,30 @@ or below a height (`/hm layer above <y>`, `/hm layer below <y>`), and a range (`
 - Placements are remembered per world and dimension, and come back when you join again.
 - Every shown placement has a frame: faint normally, bright when selected. A selected frame is cyan, or orange when
   locked. **Boxes around placements** in the [Display tab](Display.md) turns the frames off.
+
+## Easy place
+
+Easy place is building by hand with the schematic as a guard. Turn it on with **Easy place** at the bottom left of this
+tab, `/hm easyplace`, or a key of your choice on the [Keys tab](Keys.md#keys-tab).
+
+Look at a ghost block: the block it needs is taken in hand by itself, from the hotbar, from your inventory, or in
+creative out of nothing. Hold the **right mouse button** and the mod places it, facing the right way, and goes on with
+the next ghost block you look at. It always takes the first ghost block along your view, so nothing lands behind it.
+
+While it is on, **only the schematic's blocks are placed**, also while you hold the button and look around. Anywhere else
+a block in hand does nothing. The HUD shows **Easy place ON**, and why a block can't go in right now, such as a stair that
+would face the wrong way from where you stand, or a ghost block with no real block next to it.
+
+| Control | Default | What it does | Command |
+|---|---|---|---|
+| **Easy place** | Off | On or off | `/hm easyplace [on\|off]` |
+| **Easy place every** | 2 ticks | Time between blocks while you hold the button, 1 to 10 ticks | `/hm easyplace every <ticks>` |
+| **Easy air place** | Off | Ghost blocks with no real neighbour can be placed too: the mod clicks the empty spot itself. Anti-cheat plugins notice this. Separate from the printer's air place | `/hm easyplace air [on\|off]` |
+
+- Everything that doesn't place a block stays as it is: opening a chest, using a lever. Hold **Shift** to click against
+  such a block instead. To eat, look away from the ghost blocks: while you look at one, the hand holds what it needs.
+- With no placement shown, or in move mode, the game places blocks as usual. While the printer is on, the hand is the
+  printer's.
+- A ghost block needs a real neighbour to click against, unless **Easy air place** is on. It works on missing blocks
+  only, in the placements and layers shown.
+- With the selection tool in hand, the right button stays the tool's.
