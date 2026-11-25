@@ -66,6 +66,8 @@ pub trait Hands {
     /// The first block along a ray, within `reach`.
     fn clip_ray(&self, origin: [f64; 3], dir: [f64; 3], reach: f64) -> Option<Hit>;
     fn facts(&self, p: [i32; 3]) -> Facts;
+    /// Outline boxes in block-local coordinates.
+    fn outline(&self, p: [i32; 3]) -> std::sync::Arc<[[f64; 6]]>;
     /// Whether `item` places a block.
     fn places_block(&self, item: &str) -> bool;
     /// What a click on `hit` with `item` in hand would place, and where.
@@ -347,7 +349,7 @@ fn printer_step(h: &mut dyn Hands) {
         // The aim first: it only asks what a click would place, with no need of the item in hand,
         // so a block that can't be placed yet doesn't cost a change of hand and a tick.
         let click = match (&job, &item) {
-            (Job::Place, Some(item)) => aim_for(h, eye, reach, p, &wanted, item, settings.air_place),
+            (Job::Place, Some(item)) => aim_for(h, eye, reach, p, &wanted, item, settings.air_place, PlacementStage::PrinterFirst),
             (Job::Stack, Some(item)) => aim_stack(h, eye, reach, p, &wanted, item, settings.air_place),
             (Job::Adjust(_), _) => aim_block(h, eye, reach, p),
             _ => None,
@@ -495,9 +497,9 @@ fn easy_place_click(h: &mut dyn Hands) -> bool {
     }
     let Some(item) = held else { return false };
     let reach = h.reach();
-    let Some(click) = aim_for(h, eye, reach, p, &wanted, &item, air) else {
+    let Some(click) = aim_for(h, eye, reach, p, &wanted, &item, air, PlacementStage::Final) else {
         // With air place it would go: then nothing but the missing neighbour is in the way.
-        let lonely = !air && aim_for(h, eye, reach, p, &wanted, &item, true).is_some();
+        let lonely = !air && aim_for(h, eye, reach, p, &wanted, &item, true, PlacementStage::Final).is_some();
         let name = item_name(&wanted.name);
         let why = if lonely { tr!("easy.lonely", name) } else { tr!("easy.cant", name) };
         runtime::with(|s| s.easy_note = why);
@@ -723,10 +725,17 @@ fn select(h: &mut dyn Hands, item: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+#[derive(Clone, Copy)]
+enum PlacementStage {
+    PrinterFirst,
+    Stack(u32),
+    Final,
+}
+
 /// Asks the game's own placement what a click would place; whether that is (on the way to)
 /// `wanted` at `p`.
 #[allow(clippy::too_many_arguments)]
-fn would_place(h: &mut dyn Hands, p: [i32; 3], wanted: &BlockState, wanted_id: StateId, item: &str, hit: &Hit, yaw: f32, pitch: f32, sneak: bool) -> bool {
+fn would_place(h: &mut dyn Hands, p: [i32; 3], wanted: &BlockState, wanted_id: StateId, item: &str, hit: &Hit, yaw: f32, pitch: f32, sneak: bool, stage: PlacementStage) -> bool {
     let Some((pos, state)) = h.placement(hit, yaw, pitch, sneak, item) else { return false };
     if pos != p {
         return false;
@@ -735,7 +744,13 @@ fn would_place(h: &mut dyn Hands, p: [i32; 3], wanted: &BlockState, wanted_id: S
         return true;
     }
     let got = state_of(h, state);
-    verify::placement_ok(wanted, &got)
+    match stage {
+        PlacementStage::PrinterFirst => verify::placement_ok(wanted, &got) || verify::upgradable(wanted, &got),
+        PlacementStage::Stack(remaining) => {
+            verify::stack_remaining(wanted, &got).is_some_and(|after| after < remaining)
+        }
+        PlacementStage::Final => verify::placement_ok(wanted, &got),
+    }
 }
 
 fn face_axes(f: [i32; 3]) -> (usize, usize, usize) {
@@ -752,7 +767,17 @@ fn face_axes(f: [i32; 3]) -> (usize, usize, usize) {
 /// the neighbours (sneaking too, when not on a server), asking the game's own placement what each
 /// would place. With `air`, a spot no neighbour can be clicked for is clicked itself ("air
 /// place": the clicked block is replaceable, so the placement goes into it), with any look.
-fn aim_for(h: &mut dyn Hands, eye: [f64; 3], reach: f64, p: [i32; 3], wanted: &BlockState, item: &str, air: bool) -> Option<Click> {
+#[allow(clippy::too_many_arguments)]
+fn aim_for(
+    h: &mut dyn Hands,
+    eye: [f64; 3],
+    reach: f64,
+    p: [i32; 3],
+    wanted: &BlockState,
+    item: &str,
+    air: bool,
+    stage: PlacementStage,
+) -> Option<Click> {
     let wanted_id = wanted_id(h, wanted)?;
     const OFFSETS: [f64; 5] = [0.0, -0.3, 0.3, -0.42, 0.42];
     let sneaks: &[bool] = if h.remote() { &[false] } else { &[false, true] };
@@ -778,7 +803,7 @@ fn aim_for(h: &mut dyn Hands, eye: [f64; 3], reach: f64, p: [i32; 3], wanted: &B
                     if hit.pos != support && hit.pos != p {
                         continue;
                     }
-                    if would_place(h, p, wanted, wanted_id, item, &hit, yaw, pitch, sneak) {
+                    if would_place(h, p, wanted, wanted_id, item, &hit, yaw, pitch, sneak, stage) {
                         return Some(Click { yaw, pitch, hit, sneak });
                     }
                 }
@@ -807,7 +832,7 @@ fn aim_for(h: &mut dyn Hands, eye: [f64; 3], reach: f64, p: [i32; 3], wanted: &B
                 let natural = std::iter::once((ny, np.clamp(-90.0, 90.0)));
                 let any = (0..16).flat_map(|i| [0.0f32, 50.0, -50.0, 90.0, -90.0].map(move |pitch| (i as f32 * 22.5 - 180.0, pitch)));
                 for (yaw, pitch) in natural.chain(any) {
-                    if would_place(h, p, wanted, wanted_id, item, &hit, yaw, pitch, sneak) {
+                    if would_place(h, p, wanted, wanted_id, item, &hit, yaw, pitch, sneak, stage) {
                         return Some(Click { yaw, pitch, hit, sneak });
                     }
                 }
@@ -817,33 +842,39 @@ fn aim_for(h: &mut dyn Hands, eye: [f64; 3], reach: f64, p: [i32; 3], wanted: &B
     None
 }
 
-/// A click on the block at `p` itself with more of its item, that makes it `wanted` (the top
-/// half onto a bottom slab, another candle...): looked at through its own shape, else (with
-/// `air`) aimed straight at a face.
+/// Add one item to the existing stack, only if the predicted state gets closer to the target.
 fn aim_stack(h: &mut dyn Hands, eye: [f64; 3], reach: f64, p: [i32; 3], wanted: &BlockState, item: &str, air: bool) -> Option<Click> {
     let wanted_id = wanted_id(h, wanted)?;
+    let actual = actual(h, p)?;
+    let stage = PlacementStage::Stack(verify::stack_remaining(wanted, &actual)?);
+    let outline = h.outline(p);
+    let cell = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
     const OFFSETS: [f64; 3] = [0.0, -0.3, 0.3];
-    for f in printer::FACES {
-        let centre = [0, 1, 2].map(|i| f64::from(p[i]) + 0.5 + f64::from(f[i]) * 0.5);
-        let (_, u, v) = face_axes(f);
-        for du in OFFSETS {
-            for dv in OFFSETS {
-                let mut point = centre;
-                point[u] += du;
-                point[v] += dv;
-                let (yaw, pitch) = yaw_pitch(eye, point);
-                let pitch = pitch.clamp(-90.0, 90.0);
-                let dir = runtime::view_vector(yaw, pitch);
-                if let Some(hit) = h.clip_ray(eye, dir, reach)
-                    && hit.pos == p
-                    && would_place(h, p, wanted, wanted_id, item, &hit, yaw, pitch, false)
-                {
-                    return Some(Click { yaw, pitch, hit, sneak: false });
-                }
-                if air {
-                    let hit = Hit { pos: p, face: f, point };
-                    if would_place(h, p, wanted, wanted_id, item, &hit, yaw, pitch, false) {
+    // Short blocks (snow, candles, slabs) need a ray aimed at their actual outline. The
+    // cell faces also give us rays to neighbouring supports for attaching another face.
+    for bounds in outline.iter().copied().chain(std::iter::once(cell)) {
+        for face in printer::FACES {
+            let (axis, u, v) = face_axes(face);
+            let mut centre = [0, 1, 2].map(|i| f64::from(p[i]) + (bounds[i] + bounds[i + 3]) * 0.5);
+            centre[axis] = f64::from(p[axis]) + bounds[axis + if face[axis] > 0 { 3 } else { 0 }];
+            for du in OFFSETS {
+                for dv in OFFSETS {
+                    let mut point = centre;
+                    point[u] += du * (bounds[u + 3] - bounds[u]);
+                    point[v] += dv * (bounds[v + 3] - bounds[v]);
+                    let (yaw, pitch) = yaw_pitch(eye, point);
+                    let pitch = pitch.clamp(-90.0, 90.0);
+                    let dir = runtime::view_vector(yaw, pitch);
+                    if let Some(hit) = h.clip_ray(eye, dir, reach)
+                        && would_place(h, p, wanted, wanted_id, item, &hit, yaw, pitch, false, stage)
+                    {
                         return Some(Click { yaw, pitch, hit, sneak: false });
+                    }
+                    if air && (0..3).map(|i| (point[i] - eye[i]).powi(2)).sum::<f64>() <= reach * reach {
+                        let hit = Hit { pos: p, face, point };
+                        if would_place(h, p, wanted, wanted_id, item, &hit, yaw, pitch, false, stage) {
+                            return Some(Click { yaw, pitch, hit, sneak: false });
+                        }
                     }
                 }
             }

@@ -158,12 +158,17 @@ fn state_status(wanted: &BlockState, actual: &BlockState, strict: bool, power: b
 /// anything that comes later or doesn't count left out: redstone's on/off, the settings clicked
 /// after placing, connections, stair shapes, and a chest still waiting for its other half.
 pub fn placement_ok(wanted: &BlockState, got: &BlockState) -> bool {
+    placement_ok_except(wanted, got, |_| false)
+}
+
+fn placement_ok_except(wanted: &BlockState, got: &BlockState, skip: impl Fn(&str) -> bool) -> bool {
     if !same_block(wanted, got) {
         return false;
     }
     for (k, v) in &wanted.properties {
         let Some(g) = got.properties.get(k) else { continue };
-        if g == v
+        if skip(k)
+            || g == v
             || IGNORED_PROPS.contains(&k.as_str())
             || POWER_PROPS.contains(&k.as_str())
             || CONFIG_PROPS.contains(&k.as_str())
@@ -223,19 +228,54 @@ fn cycle(actual: &str, wanted: &str, n: u32, first: u32) -> Option<u32> {
     Some((w + n - a % n) % n)
 }
 
-/// Whether clicking the block that is there with another of its item makes more of it: half a
-/// slab to a double slab, more candles, sea pickles, snow layers, turtle eggs, petals.
-pub fn upgradable(wanted: &BlockState, actual: &BlockState) -> bool {
+pub(crate) const ATTACHMENT_FACES: [&str; 6] = ["north", "east", "south", "west", "up", "down"];
+
+pub(crate) fn has_stackable_faces(name: &str) -> bool {
+    matches!(name, "minecraft:glow_lichen" | "minecraft:sculk_vein" | "minecraft:resin_clump" | "minecraft:vine")
+}
+
+/// How many placements remain in this cell, if the current block can be completed by adding
+/// the same item. A wrong facing, extra face, or excess count can't be fixed by adding more.
+pub fn stack_remaining(wanted: &BlockState, actual: &BlockState) -> Option<u32> {
     if wanted.name != actual.name {
-        return false;
+        return None;
     }
-    if wanted.name.ends_with("_slab") {
-        return wanted.prop("type") == Some("double") && matches!(actual.prop("type"), Some("bottom" | "top"));
+    if wanted.name.ends_with("_slab") && wanted.prop("type") == Some("double") {
+        return match actual.prop("type") {
+            Some("double") => Some(0),
+            Some("bottom" | "top") => Some(1),
+            _ => None,
+        };
     }
-    ["pickles", "candles", "layers", "eggs", "flower_amount", "segment_amount"].iter().any(|k| {
-        let n = |s: &BlockState| s.prop(k).and_then(|v| v.parse::<u32>().ok());
-        matches!((n(wanted), n(actual)), (Some(w), Some(a)) if w > a)
-    })
+    if has_stackable_faces(&wanted.name) {
+        if !placement_ok_except(wanted, actual, |key| ATTACHMENT_FACES.contains(&key)) {
+            return None;
+        }
+        let mut remaining = 0;
+        for face in ATTACHMENT_FACES {
+            match (wanted.prop(face) == Some("true"), actual.prop(face) == Some("true")) {
+                (true, false) => remaining += 1,
+                (false, true) => return None,
+                _ => {}
+            }
+        }
+        return Some(remaining);
+    }
+    for key in ["pickles", "candles", "layers", "eggs", "flower_amount", "segment_amount"] {
+        if let Some(target) = wanted.prop(key) {
+            let target = target.parse::<u32>().ok()?;
+            let current = actual.prop(key)?.parse::<u32>().ok()?;
+            if current == 0 || !placement_ok_except(wanted, actual, |prop| prop == key) {
+                return None;
+            }
+            return target.checked_sub(current);
+        }
+    }
+    None
+}
+
+pub fn upgradable(wanted: &BlockState, actual: &BlockState) -> bool {
+    stack_remaining(wanted, actual).is_some_and(|remaining| remaining > 0)
 }
 
 /// Counts by status, for the HUD.
@@ -354,6 +394,33 @@ mod tests {
         assert!(!upgradable(&st("minecraft:oak_slab", &[("type", "top")]), &st("minecraft:oak_slab", &[("type", "bottom")])));
         assert!(upgradable(&st("minecraft:candle", &[("candles", "3")]), &st("minecraft:candle", &[("candles", "1")])));
         assert!(!upgradable(&st("minecraft:candle", &[("candles", "1")]), &st("minecraft:candle", &[("candles", "3")])));
+    }
+
+    #[test]
+    fn counts_each_placement_remaining_in_a_stack() {
+        for (name, key, max) in [
+            ("candle", "candles", 4), ("sea_pickle", "pickles", 4),
+            ("snow", "layers", 8), ("turtle_egg", "eggs", 4),
+            ("pink_petals", "flower_amount", 4), ("wildflowers", "flower_amount", 4),
+            ("leaf_litter", "segment_amount", 4),
+        ] {
+            for target in 1u32..=max {
+                for current in 1..=max {
+                    let wanted = st(&format!("minecraft:{name}"), &[(key, &target.to_string())]);
+                    let actual = st(&format!("minecraft:{name}"), &[(key, &current.to_string())]);
+                    assert_eq!(stack_remaining(&wanted, &actual), target.checked_sub(current));
+                }
+            }
+        }
+
+        let flowers = st("minecraft:pink_petals", &[("flower_amount", "4"), ("facing", "north")]);
+        let wrong = st("minecraft:pink_petals", &[("flower_amount", "1"), ("facing", "south")]);
+        assert_eq!(stack_remaining(&flowers, &wrong), None);
+
+        let lichen = |faces| st("minecraft:glow_lichen", faces);
+        let wanted = lichen(&[("north", "true"), ("down", "true"), ("south", "false")]);
+        assert_eq!(stack_remaining(&wanted, &lichen(&[("north", "true")])), Some(1));
+        assert_eq!(stack_remaining(&wanted, &lichen(&[("south", "true")])), None);
     }
 
     #[test]

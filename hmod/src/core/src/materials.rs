@@ -36,8 +36,8 @@ pub fn items_for_state(state: &BlockState) -> u32 {
     if p("part") == Some("head") && name.ends_with("_bed") {
         return 0;
     }
-    if matches!(name, "minecraft:glow_lichen" | "minecraft:sculk_vein" | "minecraft:resin_clump") {
-        let faces = ["north", "east", "south", "west", "up", "down"]
+    if crate::verify::has_stackable_faces(name) {
+        let faces = crate::verify::ATTACHMENT_FACES
             .iter()
             .filter(|f| p(f) == Some("true"))
             .count() as u32;

@@ -160,6 +160,11 @@ impl horizonmatica::hands::Hands for Hands<'_, '_> {
         }
     }
 
+    fn outline(&self, p: [i32; 3]) -> std::sync::Arc<[[f64; 6]]> {
+        let id = self.0.world.block(p[0], p[1], p[2]);
+        self.0.res.facts().get(id).outline.clone()
+    }
+
     fn places_block(&self, item: &str) -> bool {
         self.0.pack.assets.registry.default_state(item).is_some()
     }
