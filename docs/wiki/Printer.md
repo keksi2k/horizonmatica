@@ -31,6 +31,9 @@ The tab also shows **Placed this session**, and a note on what the printer is do
   The note in this tab names such a block.
 - **Plants** are placed by the item that grows them: seeds for wheat, bamboo for shoots and stalks. They count as correct
   at any stage of growth, so a bamboo shoot is fine where the schematic has a tall stalk with leaves.
+- **Blocks that take several clicks,** such as double slabs, candles, sea pickles, snow layers, turtle eggs, petals,
+  leaf litter, glow lichen and vines, are built click by click, also from an empty spot or a partly finished block.
+  A block that more of its item can't fix, such as petals facing the wrong way, is left as it is.
 - **Blocks it can't place as wanted from where you stand,** such as stairs that would face the wrong way, are not tried
   again until you move or a block next to them changes.
 - **Fluids** are not placed. Blocks that can't be placed correctly from any reachable side are skipped, and the HUD

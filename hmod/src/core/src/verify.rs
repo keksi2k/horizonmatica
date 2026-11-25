@@ -161,6 +161,7 @@ pub fn placement_ok(wanted: &BlockState, got: &BlockState) -> bool {
     placement_ok_except(wanted, got, |_| false)
 }
 
+/// [`placement_ok`], with the properties `skip` names left out too.
 fn placement_ok_except(wanted: &BlockState, got: &BlockState, skip: impl Fn(&str) -> bool) -> bool {
     if !same_block(wanted, got) {
         return false;
@@ -228,14 +229,19 @@ fn cycle(actual: &str, wanted: &str, n: u32, first: u32) -> Option<u32> {
     Some((w + n - a % n) % n)
 }
 
+/// The faces a block like glow lichen or a vine can cover, one item each.
 pub(crate) const ATTACHMENT_FACES: [&str; 6] = ["north", "east", "south", "west", "up", "down"];
 
+/// Blocks that take another face with each click of their item: glow lichen, sculk veins,
+/// resin clumps and vines.
 pub(crate) fn has_stackable_faces(name: &str) -> bool {
     matches!(name, "minecraft:glow_lichen" | "minecraft:sculk_vein" | "minecraft:resin_clump" | "minecraft:vine")
 }
 
-/// How many placements remain in this cell, if the current block can be completed by adding
-/// the same item. A wrong facing, extra face, or excess count can't be fixed by adding more.
+/// How many more clicks with its item make the block that is there `wanted`: the top half onto
+/// a bottom slab, more candles, sea pickles, snow layers, turtle eggs, petals, leaf litter, or
+/// another face of glow lichen or a vine. None when more of it can't get there: another facing,
+/// a face too many, a count already above the wanted one.
 pub fn stack_remaining(wanted: &BlockState, actual: &BlockState) -> Option<u32> {
     if wanted.name != actual.name {
         return None;
@@ -274,6 +280,7 @@ pub fn stack_remaining(wanted: &BlockState, actual: &BlockState) -> Option<u32> 
     None
 }
 
+/// Whether clicking the block that is there with another of its item brings it closer to `wanted`.
 pub fn upgradable(wanted: &BlockState, actual: &BlockState) -> bool {
     stack_remaining(wanted, actual).is_some_and(|remaining| remaining > 0)
 }

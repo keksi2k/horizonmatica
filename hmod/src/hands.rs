@@ -66,7 +66,7 @@ pub trait Hands {
     /// The first block along a ray, within `reach`.
     fn clip_ray(&self, origin: [f64; 3], dir: [f64; 3], reach: f64) -> Option<Hit>;
     fn facts(&self, p: [i32; 3]) -> Facts;
-    /// Outline boxes in block-local coordinates.
+    /// The outline boxes of the block at `p`, block-local (`[x0, y0, z0, x1, y1, z1]`).
     fn outline(&self, p: [i32; 3]) -> std::sync::Arc<[[f64; 6]]>;
     /// Whether `item` places a block.
     fn places_block(&self, item: &str) -> bool;
@@ -725,10 +725,15 @@ fn select(h: &mut dyn Hands, item: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// What a click may place, for [`would_place`] to accept it.
 #[derive(Clone, Copy)]
 enum PlacementStage {
+    /// The printer's first click into an empty cell: the wanted block, or the start of a stack
+    /// that more clicks finish (half a double slab, one of three candles...).
     PrinterFirst,
+    /// Another click on a stack with this many clicks left: it must leave fewer.
     Stack(u32),
+    /// Easy place: the wanted block in one click.
     Final,
 }
 
@@ -763,21 +768,13 @@ fn face_axes(f: [i32; 3]) -> (usize, usize, usize) {
     (axis, u, v)
 }
 
-/// A look and click that make vanilla's placement put `wanted` at `p`: points on each face of
-/// the neighbours (sneaking too, when not on a server), asking the game's own placement what each
-/// would place. With `air`, a spot no neighbour can be clicked for is clicked itself ("air
-/// place": the clicked block is replaceable, so the placement goes into it), with any look.
+/// A look and click that make vanilla's placement put `wanted` at `p` (or what `stage` lets
+/// count as a step towards it): points on each face of the neighbours (sneaking too, when not on
+/// a server), asking the game's own placement what each would place. With `air`, a spot no
+/// neighbour can be clicked for is clicked itself ("air place": the clicked block is
+/// replaceable, so the placement goes into it), with any look.
 #[allow(clippy::too_many_arguments)]
-fn aim_for(
-    h: &mut dyn Hands,
-    eye: [f64; 3],
-    reach: f64,
-    p: [i32; 3],
-    wanted: &BlockState,
-    item: &str,
-    air: bool,
-    stage: PlacementStage,
-) -> Option<Click> {
+fn aim_for(h: &mut dyn Hands, eye: [f64; 3], reach: f64, p: [i32; 3], wanted: &BlockState, item: &str, air: bool, stage: PlacementStage) -> Option<Click> {
     let wanted_id = wanted_id(h, wanted)?;
     const OFFSETS: [f64; 5] = [0.0, -0.3, 0.3, -0.42, 0.42];
     let sneaks: &[bool] = if h.remote() { &[false] } else { &[false, true] };
@@ -842,7 +839,9 @@ fn aim_for(
     None
 }
 
-/// Add one item to the existing stack, only if the predicted state gets closer to the target.
+/// A click with more of its item on the block at `p` that brings it closer to `wanted` (the top
+/// half onto a bottom slab, another candle, another face of a vine...): on the block's own
+/// outline, else on a neighbour it can grow onto, else (with `air`) straight at a face.
 fn aim_stack(h: &mut dyn Hands, eye: [f64; 3], reach: f64, p: [i32; 3], wanted: &BlockState, item: &str, air: bool) -> Option<Click> {
     let wanted_id = wanted_id(h, wanted)?;
     let actual = actual(h, p)?;
