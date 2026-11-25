@@ -1,6 +1,6 @@
 id = "horizonmatica"
 name = "Horizonmatica"
-version = "0.5.3"
+version = "0.5.4"
 description = "Litematica for Horizon: load .litematic schematics as a ghost overlay, verify, save areas, material list and printer."
 authors = ["keksi2k"]
 license = "MIT"
